@@ -154,7 +154,8 @@ export class InputManager {
 
     for (const [action, binding] of Object.entries(bindings)) {
       if (binding.keyboard !== null) {
-        this.keys.set(action as ActionName, keyboard.addKey(binding.keyboard, false));
+        // enableCapture=true prevents browser default behavior (scrolling on arrows, etc.)
+        this.keys.set(action as ActionName, keyboard.addKey(binding.keyboard, true));
       }
     }
   }

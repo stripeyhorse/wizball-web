@@ -194,6 +194,11 @@ export default class GameScene extends Phaser.Scene {
     // Setup input FIRST so update() can always access it even if later init fails
     this.inputManager = new InputManager(this);
 
+    // Clean up InputManager when scene stops (shutdown is an event, not a method)
+    this.events.once('shutdown', () => {
+      this.inputManager?.destroy();
+    });
+
     // C++ spin calculation: top_spin_angle = (wizball_radius << bitshift) % TWO_PI_PERCENT
     // In C++, TWO_PI_PERCENT = 62831 (integer), so: (24 << 8) % 62831 = 6144 % 62831 = 6144
     // Divider = 6144 / 64 = 96
@@ -1535,13 +1540,15 @@ export default class GameScene extends Phaser.Scene {
 
     (bullet as any).isPaintBullet = paintTint !== undefined;
     (bullet as any).paintColor = this.paintColor;
-    (bullet as any).active = true;
+
+    // Add to group BEFORE setting velocity (group.add can reset body properties)
+    this.bulletGroup.add(bullet);
 
     // Use BULLET_SPEED constant (720 px/s = C++ value), direction from vx
     const velX = vx > 0 ? BULLET_SPEED : (vx < 0 ? -BULLET_SPEED : 0);
+    const body = bullet.body as Phaser.Physics.Arcade.Body;
+    body.setAllowGravity(false);
     bullet.setVelocity(velX, vy);
-
-    this.bulletGroup.add(bullet);
   }
 
   private fireCatelliteBullet(): void {
@@ -1693,9 +1700,11 @@ export default class GameScene extends Phaser.Scene {
     } else {
       // Arcade physics fallback - re-enable so physics handles movement and collisions
       body.moves = true;
+      // Convert fixed-point velocity (px/frame * 256) to px/sec for Arcade:
+      // px/frame = xVel / 256, px/sec = px/frame * 60
       body.setVelocity(
-        this.xVel / PRIVATE_SCALE,
-        this.yVel / PRIVATE_SCALE
+        (this.xVel / PRIVATE_SCALE) * 60,
+        (this.yVel / PRIVATE_SCALE) * 60
       );
     }
 
@@ -2116,7 +2125,4 @@ export default class GameScene extends Phaser.Scene {
     this.inputManager.update();
   }
 
-  shutdown(): void {
-    this.inputManager?.destroy();
-  }
 }
