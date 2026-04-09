@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "app": "Wizball Phaser",
+    "version": "1.0",
+    "image": "pickup.png",
+    "format": "RGBA8888",
+    "size": {
+      "w": 0,
+      "h": 0
+    },
+    "scale": 1
+  },
+  "frames": {
+    "pickup_0": {
+      "frame": {
+        "x": 8,
+        "y": 8,
+        "w": 48,
+        "h": 48
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 48,
+        "h": 48
+      },
+      "sourceSize": {
+        "w": 48,
+        "h": 48
+      }
+    }
+  }
+}

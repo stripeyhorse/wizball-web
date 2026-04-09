@@ -1,20 +1,21 @@
 import Phaser from 'phaser';
-import { PRELOAD, GAME } from '../types/game';
+import { PRELOAD } from '../types/game';
 
 // Frame sizes confirmed from C++ source BMP filenames:
 //   wizball[set][48][48][24][24].bmp   → 512×512 → 10 cols, 7 rows (64 frames)
 //   enemies_01[set][48][48][24][24].bmp → 512×512 → 48×48
 //   level_1_tiles_new[set][16][16][0][0].bmp → 512×512 → 32×32 = 1024 frames
-//   catellite[arb].bmp                → arbitrary atlas (no uniform grid)
-//   paintballs_and_drips[arb].bmp     → arbitrary atlas
-//   player_bullets[arb].bmp           → arbitrary atlas
+//   catellite[arb].bmp                → arbitrary atlas (17 frames)
+//   paintballs_and_drips[arb].bmp     → arbitrary atlas (30 frames)
+//   player_bullets[arb].bmp           → arbitrary atlas (5 frames)
+//   pickup[arb].bmp                   → arbitrary atlas (1 frame)
 
 export default class PreloadScene extends Phaser.Scene {
   constructor() {
     super({ key: PRELOAD });
   }
 
-  preload(): void {
+  async preload(): Promise<void> {
     const width = this.cameras.main.width;
     const height = this.cameras.main.height;
 
@@ -62,72 +63,101 @@ export default class PreloadScene extends Phaser.Scene {
     this.load.spritesheet('enemies', 'assets/sprites/enemies.png', {
       frameWidth: 48, frameHeight: 48
     });
-    this.load.spritesheet('tiles', 'assets/sprites/tiles.png', {
-      frameWidth: 16, frameHeight: 16
+    this.load.spritesheet('enemies02', 'assets/sprites/enemies02.png', {
+      frameWidth: 48, frameHeight: 48
     });
 
-    // [arb] sprites — load as plain images, we use specific regions or frame 0
-    this.load.image('catellite', 'assets/sprites/catellite.png');
-    this.load.image('paintballs', 'assets/sprites/paintballs.png');
-    this.load.image('pickups', 'assets/sprites/pickups.png');
-    this.load.image('player_bullets', 'assets/sprites/player_bullets.png');
-    this.load.image('background', 'assets/sprites/background.png');
+    // Level tilesheets (16x16 tiles, 32x32 grid)
+    for (let i = 1; i <= 8; i++) {
+      this.load.spritesheet(`level_${i}_tiles`, `assets/sprites/level_${i}_tiles.png`, {
+        frameWidth: 16, frameHeight: 16
+      });
+    }
 
-    // Sounds
-    this.load.audio('bounce', 'assets/wizball_bounce.wav');
-    this.load.audio('explode', 'assets/wizball_explode.wav');
-    this.load.audio('fire', 'assets/wizball_or_cat_fire_normal.wav');
-    this.load.audio('pickup', 'assets/bonus_pearl_pickup.wav');
+    // Background images
+    for (let i = 1; i <= 8; i++) {
+      this.load.image(`background_level_${i}`, `assets/sprites/background_level_${i}.png`);
+    }
+
+    // Load [arb] atlas textures and parse frame data
+    this.load.atlas('catellite', 'assets/sprites/catellite.png', 'assets/sprites/catellite-atlas.json');
+    this.load.atlas('paintballs', 'assets/sprites/paintballs_and_drips.png', 'assets/sprites/paintballs-atlas.json');
+    this.load.atlas('bullets', 'assets/sprites/player_bullets.png', 'assets/sprites/bullets-atlas.json');
+    this.load.atlas('pickup', 'assets/sprites/pickup.png', 'assets/sprites/pickup-atlas.json');
+    this.load.atlas('panel_icons', 'assets/sprites/panel_icons.png', 'assets/sprites/panel_icons-atlas.json');
+
+    // Load C++ tilemap files
+    for (let i = 1; i <= 8; i++) {
+      this.load.text(`tilemap_${i}`, `assets/tilemaps/LEVEL_${i}_TILEMAP.txt`);
+    }
+
+    // Load C++ tileset files
+    for (let i = 0; i <= 7; i++) {
+      this.load.text(`tileset_${i}`, `assets/tilesets/TILESET_${String(i).padStart(3, '0')}.TXT`);
+    }
+
+    // Sounds - all audio files that exist in public/assets/
+    const soundFiles = [
+      'asteroid_scrape',
+      'bonus_pearl_pickup',
+      'bonus_selection',
+      'catellite_bubble_shield_loop',
+      'catellite_explode',
+      'catellite_hit',
+      'catellite_mutant_bubble_loop',
+      'catellite_spark',
+      'catellite_zoom_off_screen',
+      'cauldron_beam_burst',
+      'cauldron_full_burst',
+      'enemy_bounce',
+      'enemy_bullet_ping',
+      'enemy_explode',
+      'enemy_fire_bullet_spread',
+      'enemy_fire_single_bullet',
+      'freaky_bits_cancelled',
+      'menu_select',
+      'menu_select_back',
+      'menu_select_bad',
+      'menu_selector_move',
+      'paintball_explode',
+      'paintball_explode_special_paintdrop_created',
+      'paintdrop_collection',
+      'paintdrop_splash',
+      'paintdrop_splat',
+      'permanent_upgrade_selected',
+      'score_counter_high_tick',
+      'score_counter_low_tick',
+      'score_counter_medium_tick',
+      'smart_bomb',
+      'spawn_new_wave_sound',
+      'special_paintball_pickup_extra_life',
+      'special_paintball_pickup_filth_raid',
+      'special_paintball_pickup_freaky_bits',
+      'special_paintball_pickup_indestructacat',
+      'special_paintball_pickup_mutant_cat',
+      'warp_tube_appear',
+      'warp_tube_deposit',
+      'wizball_bounce',
+      'wizball_bubble_shield_loop',
+      'wizball_explode',
+      'wizball_explode_bonus_level',
+      'wizball_full_cauldron_notice',
+      'wizball_new_life_appear_sound',
+      'wizball_or_cat_fire_blazers',
+      'wizball_or_cat_fire_normal',
+      'wizball_or_cat_fire_three_way',
+      'wizball_or_catellite_bullet_ping',
+      'wizball_or_catellite_lab_pop',
+      'wizball_or_catellite_shield_impact',
+      'wizball_up_down_shield_pulse',
+      'wizball_warp_spin_up',
+    ];
+    for (const sound of soundFiles) {
+      this.load.audio(sound, `assets/${sound}.wav`);
+    }
   }
 
   create(): void {
-    // Generate paint-drop textures (circles of each color) since paintballs[arb] isn't a grid
-    this.generatePaintTextures();
-    // Generate bullet texture
-    this.generateBulletTexture();
-
-    console.log('Wizball frames:', this.textures.get('wizball').frameTotal);
-    console.log('Tiles frames:', this.textures.get('tiles').frameTotal);
-
-    this.scene.start(GAME);
-  }
-
-  private generatePaintTextures(): void {
-    const colors = [0xff0000, 0x00cc00, 0x0066ff, 0xffffff];
-    const names = ['paint_red', 'paint_green', 'paint_blue', 'paint_white'];
-    const radius = 8;
-    const size = radius * 2;
-
-    colors.forEach((color, i) => {
-      const canvas = document.createElement('canvas');
-      canvas.width = size;
-      canvas.height = size;
-      const ctx = canvas.getContext('2d')!;
-      ctx.fillStyle = `#${color.toString(16).padStart(6, '0')}`;
-      ctx.beginPath();
-      ctx.arc(radius, radius, radius - 1, 0, Math.PI * 2);
-      ctx.fill();
-      // Highlight
-      ctx.fillStyle = 'rgba(255,255,255,0.4)';
-      ctx.beginPath();
-      ctx.arc(radius - 2, radius - 2, radius * 0.35, 0, Math.PI * 2);
-      ctx.fill();
-      this.textures.addCanvas(names[i], canvas);
-    });
-  }
-
-  private generateBulletTexture(): void {
-    const canvas = document.createElement('canvas');
-    canvas.width = 12;
-    canvas.height = 6;
-    const ctx = canvas.getContext('2d')!;
-    // Glowing bullet
-    const grad = ctx.createRadialGradient(6, 3, 0, 6, 3, 5);
-    grad.addColorStop(0, '#ffffff');
-    grad.addColorStop(0.4, '#ffff00');
-    grad.addColorStop(1, 'rgba(255,200,0,0)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 12, 6);
-    this.textures.addCanvas('bullet', canvas);
+    this.scene.start('Title');
   }
 }

@@ -1,0 +1,355 @@
+{
+  "meta": {
+    "app": "Wizball Phaser",
+    "version": "1.0",
+    "image": "catellite.png",
+    "format": "RGBA8888",
+    "size": {
+      "w": 0,
+      "h": 0
+    },
+    "scale": 1
+  },
+  "frames": {
+    "catellite_0": {
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "sourceSize": {
+        "w": 24,
+        "h": 24
+      }
+    },
+    "catellite_1": {
+      "frame": {
+        "x": 24,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "sourceSize": {
+        "w": 24,
+        "h": 24
+      }
+    },
+    "catellite_2": {
+      "frame": {
+        "x": 48,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "sourceSize": {
+        "w": 24,
+        "h": 24
+      }
+    },
+    "catellite_3": {
+      "frame": {
+        "x": 72,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "sourceSize": {
+        "w": 24,
+        "h": 24
+      }
+    },
+    "catellite_4": {
+      "frame": {
+        "x": 96,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "sourceSize": {
+        "w": 24,
+        "h": 24
+      }
+    },
+    "catellite_5": {
+      "frame": {
+        "x": 0,
+        "y": 24,
+        "w": 24,
+        "h": 24
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "sourceSize": {
+        "w": 24,
+        "h": 24
+      }
+    },
+    "catellite_6": {
+      "frame": {
+        "x": 24,
+        "y": 24,
+        "w": 24,
+        "h": 24
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "sourceSize": {
+        "w": 24,
+        "h": 24
+      }
+    },
+    "catellite_7": {
+      "frame": {
+        "x": 48,
+        "y": 24,
+        "w": 24,
+        "h": 24
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 24
+      },
+      "sourceSize": {
+        "w": 24,
+        "h": 24
+      }
+    },
+    "catellite_8": {
+      "frame": {
+        "x": 0,
+        "y": 65,
+        "w": 32,
+        "h": 30
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 32,
+        "h": 30
+      },
+      "sourceSize": {
+        "w": 32,
+        "h": 30
+      }
+    },
+    "catellite_9": {
+      "frame": {
+        "x": 32,
+        "y": 65,
+        "w": 32,
+        "h": 30
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 32,
+        "h": 30
+      },
+      "sourceSize": {
+        "w": 32,
+        "h": 30
+      }
+    },
+    "catellite_10": {
+      "frame": {
+        "x": 64,
+        "y": 65,
+        "w": 32,
+        "h": 30
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 32,
+        "h": 30
+      },
+      "sourceSize": {
+        "w": 32,
+        "h": 30
+      }
+    },
+    "catellite_11": {
+      "frame": {
+        "x": 96,
+        "y": 65,
+        "w": 32,
+        "h": 30
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 32,
+        "h": 30
+      },
+      "sourceSize": {
+        "w": 32,
+        "h": 30
+      }
+    },
+    "catellite_12": {
+      "frame": {
+        "x": 0,
+        "y": 97,
+        "w": 32,
+        "h": 30
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 32,
+        "h": 30
+      },
+      "sourceSize": {
+        "w": 32,
+        "h": 30
+      }
+    },
+    "catellite_13": {
+      "frame": {
+        "x": 32,
+        "y": 97,
+        "w": 32,
+        "h": 30
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 32,
+        "h": 30
+      },
+      "sourceSize": {
+        "w": 32,
+        "h": 30
+      }
+    },
+    "catellite_14": {
+      "frame": {
+        "x": 64,
+        "y": 97,
+        "w": 32,
+        "h": 30
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 32,
+        "h": 30
+      },
+      "sourceSize": {
+        "w": 32,
+        "h": 30
+      }
+    },
+    "catellite_15": {
+      "frame": {
+        "x": 96,
+        "y": 97,
+        "w": 32,
+        "h": 30
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 32,
+        "h": 30
+      },
+      "sourceSize": {
+        "w": 32,
+        "h": 30
+      }
+    },
+    "catellite_16": {
+      "frame": {
+        "x": 72,
+        "y": 24,
+        "w": 40,
+        "h": 40
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 40,
+        "h": 40
+      },
+      "sourceSize": {
+        "w": 40,
+        "h": 40
+      }
+    }
+  }
+}
