@@ -192,12 +192,8 @@ export default class GameScene extends Phaser.Scene {
     this.cameras.main.roundPixels = true;
 
     // Setup input FIRST so update() can always access it even if later init fails
+    // InputManager self-registers shutdown cleanup
     this.inputManager = new InputManager(this);
-
-    // Clean up InputManager when scene stops (shutdown is an event, not a method)
-    this.events.once('shutdown', () => {
-      this.inputManager?.destroy();
-    });
 
     // C++ spin calculation: top_spin_angle = (wizball_radius << bitshift) % two_pi_percent
     // In the C++ scripting language, % is MATH_ADAPT_BY_PERCENTAGE = a * b / 10000

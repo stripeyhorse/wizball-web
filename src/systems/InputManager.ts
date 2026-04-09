@@ -29,6 +29,9 @@ export class InputManager {
 
     // Listen for settings changes to rebuild key bindings
     scene.game.events.on('settings:changed', this.rebuildKeys, this);
+
+    // Auto-cleanup when the scene stops — ensures key captures are released
+    scene.events.once('shutdown', () => this.destroy());
   }
 
   isDown(action: ActionName): boolean {
@@ -111,6 +114,7 @@ export class InputManager {
   }
 
   destroy(): void {
+    if (this.keys.size === 0) return; // Already destroyed
     this.scene.game.events.off('settings:changed', this.rebuildKeys, this);
     const keyboard = this.scene.input.keyboard;
     if (keyboard) {
