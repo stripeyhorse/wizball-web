@@ -29,9 +29,10 @@ const config: Phaser.Types.Core.GameConfig = {
   backgroundColor: '#000000',
   // C++ remake runs at 60fps (BPS_TO_TIMER(60)) — lock to match
   // Without this, high-refresh monitors (120/144/240hz) run physics too fast
+  // forceSetTimeOut: true ensures the cap works (rAF alone doesn't cap)
   fps: {
     target: 60,
-    forceSetTimeOut: false
+    forceSetTimeOut: true
   },
   physics: {
     default: 'arcade',

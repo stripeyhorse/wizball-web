@@ -54,7 +54,9 @@ export default class TitleScene extends Phaser.Scene {
     });
     this.settingsText.setOrigin(0.5);
 
-    const spaceKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    // Remove any lingering capture on SPACE from other scenes, then re-add
+    this.input.keyboard!.removeCapture(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    const spaceKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE, true);
     spaceKey.on('down', this.startGame, this);
 
     const settingsKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.S);

@@ -171,6 +171,9 @@ export default class GameScene extends Phaser.Scene {
   private paintIndicator!: Phaser.GameObjects.Rectangle;
   private hudSystem!: HUDSystem;
 
+  // Debug
+  private fpsText!: Phaser.GameObjects.Text;
+
   // Sounds
   private bounceSound!: Phaser.Sound.BaseSound;
   private fireSound!: Phaser.Sound.BaseSound;
@@ -256,6 +259,11 @@ export default class GameScene extends Phaser.Scene {
     this.cauldronSystem = new CauldronSystem(this);
     this.cauldronSystem.setupCauldrons(this.currentLevel);
     this.cauldronSystem.setFillLevels(this.cauldronFill);
+
+    // FPS counter (bottom-right of bottom bar)
+    this.fpsText = this.add.text(GAME_WIDTH - 8, GAME_HEIGHT - 4, '', {
+      fontSize: '10px', color: '#00ff00', fontFamily: 'monospace',
+    }).setOrigin(1, 1).setScrollFactor(0).setDepth(200);
 
     // Initial velocity - C++ starts with a small downward push
     this.yVel = 2 * PRIVATE_SCALE;
@@ -1576,34 +1584,15 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private createHUD(): void {
-    this.hudText = this.add.text(10, 10, 'WIZBALL  Lives: 2', {
-      fontSize: '14px',
-      color: '#ffffff',
-      fontFamily: 'monospace',
-      backgroundColor: '#00000088',
-      padding: { x: 8, y: 4 }
-    });
-    this.hudText.setScrollFactor(0);
-    this.hudText.setDepth(100);
+    // Main HUD text (hidden, used for internal state tracking)
+    this.hudText = this.add.text(-100, -100, '', { fontSize: '1px' });
+    this.hudText.setVisible(false);
 
-    this.add.text(GAME_WIDTH - 100, 10, 'PAINT:', {
-      fontSize: '14px',
-      color: '#ffffff',
-      fontFamily: 'monospace'
-    }).setDepth(100).setScrollFactor(0);
+    // Paint indicator (managed by HUDSystem now, but GameScene still references it)
+    this.paintIndicator = this.add.rectangle(-100, -100, 1, 1, 0x666666);
+    this.paintIndicator.setVisible(false);
 
-    this.paintIndicator = this.add.rectangle(GAME_WIDTH - 40, 18, 24, 16, 0x666666);
-    this.paintIndicator.setDepth(100);
-    this.paintIndicator.setScrollFactor(0);
-    this.paintIndicator.setAlpha(0.3);
-
-    this.add.text(10, GAME_HEIGHT - 20, 'ARROWS: Move  SPACE: Fire  WIGGLE L/R: Use top bonus', {
-      fontSize: '10px',
-      color: '#888888',
-      fontFamily: 'monospace'
-    }).setDepth(100).setScrollFactor(0);
-
-    // Initialize HUD system
+    // Initialize HUD system (draws top and bottom bars)
     const initialState: HUDState = {
       score: this.score,
       lives: this.lives,
@@ -1943,14 +1932,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private updateHUD(): void {
-    const style = ['BASIC', 'CTRL', 'FULL'][this.movementStyle];
-    const paint = this.hasPaint ? PAINT_COLORS[this.paintColor] : '---';
-
-    this.hudText.setText(
-      `WIZBALL  Score:${this.score}  Lives:${this.lives}  Mode:${style}  Paint:${paint}`
-    );
-
-    // Update HUD system
+    // Update HUD system (draws score, lives, paint, catellite in top/bottom bars)
     this.hudSystem.setState({
       score: this.score,
       lives: this.lives,
@@ -2108,6 +2090,9 @@ export default class GameScene extends Phaser.Scene {
     this.warpTubeSystem.checkWarp(this.player);
     this.updateHUD();
     this.cleanupPaintDrops();
+
+    // FPS counter
+    this.fpsText.setText(`${Math.round(this.game.loop.actualFps)} fps`);
 
     // Must be last — stores previous frame's button state for justDown detection
     this.inputManager.update();

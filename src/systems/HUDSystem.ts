@@ -11,6 +11,16 @@ export interface HUDState {
   currentLevel: number;
 }
 
+// Layout matching original Wizball:
+// Top bar (y=0..47): score, lives, weapon panels, level
+// Game area (y=48..367): 320px play area
+// Bottom bar (y=368..415): cauldrons, level indicator
+
+const TOP_BAR_HEIGHT = 48;
+const GAME_WIDTH = 640;
+const GAME_HEIGHT = 416;
+const BOTTOM_BAR_Y = GAME_HEIGHT - TOP_BAR_HEIGHT; // 368
+
 export default class HUDSystem {
   private scene: Phaser.Scene;
   private state: HUDState;
@@ -22,7 +32,10 @@ export default class HUDSystem {
   private paintLabel!: Phaser.GameObjects.Text;
   private catelliteStatus!: Phaser.GameObjects.Text;
   private levelText!: Phaser.GameObjects.Text;
-  
+  private topBar!: Phaser.GameObjects.Rectangle;
+  private bottomBar!: Phaser.GameObjects.Rectangle;
+  private statusLine!: Phaser.GameObjects.Line;
+
   constructor(scene: Phaser.Scene, initialState: HUDState) {
     this.scene = scene;
     this.state = initialState;
@@ -30,80 +43,79 @@ export default class HUDSystem {
   }
 
   private createHUD(): void {
-    const baseY = 10;
-    const rightX = 630;
-    // Score (top-left)
-    this.scoreText = this.scene.add.text(10, baseY, '', {
-      fontSize: '14px',
+    // Top status bar background
+    this.topBar = this.scene.add.rectangle(GAME_WIDTH / 2, TOP_BAR_HEIGHT / 2, GAME_WIDTH, TOP_BAR_HEIGHT, 0x000000);
+    this.topBar.setScrollFactor(0).setDepth(90);
+
+    // Bottom status bar background
+    this.bottomBar = this.scene.add.rectangle(GAME_WIDTH / 2, BOTTOM_BAR_Y + TOP_BAR_HEIGHT / 2, GAME_WIDTH, TOP_BAR_HEIGHT, 0x000000);
+    this.bottomBar.setScrollFactor(0).setDepth(90);
+
+    // Divider lines (like the original's green/red borders)
+    const topLine = this.scene.add.rectangle(GAME_WIDTH / 2, TOP_BAR_HEIGHT, GAME_WIDTH, 2, 0x448844);
+    topLine.setScrollFactor(0).setDepth(95);
+    const bottomLine = this.scene.add.rectangle(GAME_WIDTH / 2, BOTTOM_BAR_Y, GAME_WIDTH, 2, 0x448844);
+    bottomLine.setScrollFactor(0).setDepth(95);
+
+    // === TOP BAR ===
+
+    // Score (top-left) — large, like the original's "000000"
+    this.scoreText = this.scene.add.text(8, 6, '', {
+      fontSize: '16px',
       color: '#ffffff',
       fontFamily: 'monospace',
-      backgroundColor: '#00000088',
-      padding: { x: 8, y: 4 }
+      fontStyle: 'bold',
     });
-    this.scoreText.setScrollFactor(0);
-    this.scoreText.setDepth(100);
+    this.scoreText.setScrollFactor(0).setDepth(100);
 
-    // Lives (next to score)
-    this.livesText = this.scene.add.text(120, baseY, '', {
-      fontSize: '14px',
-      color: '#ffff00',
-      fontFamily: 'monospace',
-      backgroundColor: '#00000088',
-      padding: { x: 8, y: 4 }
-    });
-    this.livesText.setScrollFactor(0);
-    this.livesText.setDepth(100);
-
-    // Level indicator
-    this.levelText = this.scene.add.text(10, baseY + 25, '', {
+    // Lives (below score)
+    this.livesText = this.scene.add.text(8, 28, '', {
       fontSize: '12px',
-      color: '#88ff88',
+      color: '#ffff44',
       fontFamily: 'monospace',
-      backgroundColor: '#00000088',
-      padding: { x: 6, y: 3 }
     });
-    this.levelText.setScrollFactor(0);
-    this.levelText.setDepth(100);
+    this.livesText.setScrollFactor(0).setDepth(100);
 
-    // Paint color indicator (top-right)
-    this.paintLabel = this.scene.add.text(rightX - 90, baseY, 'PAINT:', {
-      fontSize: '14px',
-      color: '#ffffff',
-      fontFamily: 'monospace'
-    });
-    this.paintLabel.setScrollFactor(0);
-    this.paintLabel.setOrigin(1, 0);
-    this.paintLabel.setDepth(100);
-
-    this.paintIndicator = this.scene.add.rectangle(rightX - 10, baseY + 10, 24, 16, 0x666666);
-    this.paintIndicator.setScrollFactor(0);
-    this.paintIndicator.setDepth(100);
-    this.paintIndicator.setAlpha(0.3);
-
-    // Catellite status
-    this.catelliteStatus = this.scene.add.text(rightX - 90, baseY + 30, '', {
+    // Paint color indicator (top-right area)
+    this.paintLabel = this.scene.add.text(GAME_WIDTH - 120, 8, 'PAINT:', {
       fontSize: '12px',
+      color: '#aaaaaa',
+      fontFamily: 'monospace',
+    });
+    this.paintLabel.setScrollFactor(0).setDepth(100);
+
+    this.paintIndicator = this.scene.add.rectangle(GAME_WIDTH - 50, 16, 28, 16, 0x666666);
+    this.paintIndicator.setScrollFactor(0).setDepth(100).setAlpha(0.3);
+
+    // Catellite status (top-right, below paint)
+    this.catelliteStatus = this.scene.add.text(GAME_WIDTH - 120, 28, '', {
+      fontSize: '10px',
       color: '#88aaff',
-      fontFamily: 'monospace'
+      fontFamily: 'monospace',
     });
-    this.catelliteStatus.setScrollFactor(0);
-    this.catelliteStatus.setOrigin(1, 0);
-    this.catelliteStatus.setDepth(100);
+    this.catelliteStatus.setScrollFactor(0).setDepth(100);
+
+    // === BOTTOM BAR ===
+
+    // Level indicator (bottom-right, like the "1" in the original)
+    this.levelText = this.scene.add.text(GAME_WIDTH - 40, BOTTOM_BAR_Y + 14, '', {
+      fontSize: '20px',
+      color: '#44aaff',
+      fontFamily: 'monospace',
+      fontStyle: 'bold',
+      stroke: '#0044aa',
+      strokeThickness: 2,
+    });
+    this.levelText.setScrollFactor(0).setDepth(100).setOrigin(0.5);
 
     this.update();
   }
 
   public update(): void {
-    // Update score
-    this.scoreText.setText(`SCORE: ${this.state.score.toString().padStart(6, '0')}`);
-
-    // Update lives
+    this.scoreText.setText(this.state.score.toString().padStart(6, '0'));
     this.livesText.setText(`LIVES: ${this.state.lives}`);
+    this.levelText.setText(`${this.state.currentLevel}`);
 
-    // Update level
-    this.levelText.setText(`LEVEL: ${this.state.currentLevel}`);
-
-    // Update paint indicator
     if (this.state.hasPaint) {
       const colors = [0xff0000, 0x00ff00, 0x0000ff];
       this.paintIndicator.fillColor = colors[this.state.currentPaintColor];
@@ -113,17 +125,15 @@ export default class HUDSystem {
       this.paintIndicator.setAlpha(0.3);
     }
 
-    // Update catellite status
     if (!this.state.hasCatellite) {
       this.catelliteStatus.setText('');
     } else if (this.state.catelliteHasShield) {
-      this.catelliteStatus.setText('CATELLITE: SHIELD');
+      this.catelliteStatus.setText('CAT: SHIELD');
       this.catelliteStatus.setColor('#aaddff');
     } else {
-      this.catelliteStatus.setText('CATELLITE: ACTIVE');
+      this.catelliteStatus.setText('CAT: ACTIVE');
       this.catelliteStatus.setColor('#88aaff');
     }
-
   }
 
   public setState(newState: Partial<HUDState>): void {
@@ -142,5 +152,7 @@ export default class HUDSystem {
     this.paintLabel.destroy();
     this.catelliteStatus.destroy();
     this.levelText.destroy();
+    this.topBar.destroy();
+    this.bottomBar.destroy();
   }
 }

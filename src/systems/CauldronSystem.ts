@@ -129,14 +129,14 @@ export default class CauldronSystem {
   }
 
   private positionCauldrons(): void {
-    // C++ positions: RED=448, GREEN=496, BLUE=544, COMBO=608, all at Y=32
-    // These are screen-space positions (HUD area)
-    const y = 32;
-    
-    this.cauldrons[0].position = { x: 448, y };
-    this.cauldrons[1].position = { x: 496, y };
-    this.cauldrons[2].position = { x: 544, y };
-    this.cauldrons[3].position = { x: 608, y };
+    // Position cauldrons in bottom status bar (matching original layout)
+    // Original: 4 cauldrons spread across bottom-left of screen
+    const y = 392; // Bottom bar center (368 + 24)
+
+    this.cauldrons[0].position = { x: 80, y };
+    this.cauldrons[1].position = { x: 160, y };
+    this.cauldrons[2].position = { x: 240, y };
+    this.cauldrons[3].position = { x: 320, y };
   }
 
   private renderCauldrons(): void {
