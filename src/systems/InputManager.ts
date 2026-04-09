@@ -113,13 +113,18 @@ export class InputManager {
   destroy(): void {
     this.scene.game.events.off('settings:changed', this.rebuildKeys, this);
     const keyboard = this.scene.input.keyboard;
-    this.keys.forEach(key => {
-      if (keyboard) {
-        keyboard.removeKey(key, true); // true = destroy the key object too
-      } else {
-        key.destroy();
-      }
-    });
+    if (keyboard) {
+      // Remove captures FIRST, then remove keys
+      // addKey(code, true) adds a global capture that persists after removeKey
+      this.keys.forEach(key => {
+        keyboard.removeCapture(key.keyCode);
+      });
+      this.keys.forEach(key => {
+        keyboard.removeKey(key, true);
+      });
+    } else {
+      this.keys.forEach(key => key.destroy());
+    }
     this.keys.clear();
   }
 
