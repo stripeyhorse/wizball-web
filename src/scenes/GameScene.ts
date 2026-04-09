@@ -191,15 +191,19 @@ export default class GameScene extends Phaser.Scene {
   create(): void {
     this.cameras.main.roundPixels = true;
 
+    // Setup input FIRST so update() can always access it even if later init fails
+    this.inputManager = new InputManager(this);
+
     // C++ spin calculation: top_spin_angle = (wizball_radius << bitshift) % TWO_PI_PERCENT
-    // = (24 << 8) % 62831 = 6144. Divider = 6144 / 64 = 96.
-    this.topSpinAngle = (WIZBALL_RADIUS << BITSHIFT) % Math.round(TWO_PI_PERCENT);
+    // In C++, TWO_PI_PERCENT = 62831 (integer), so: (24 << 8) % 62831 = 6144 % 62831 = 6144
+    // Divider = 6144 / 64 = 96
+    this.topSpinAngle = (WIZBALL_RADIUS << BITSHIFT) % 62831;
     this.spinAngleToFrameDivider = this.topSpinAngle / WIZBALL_FRAME_COUNT;
 
-    // Create sounds
-    this.bounceSound = this.sound.add('wizball_bounce', { volume: 0.5 });
-    this.fireSound = this.sound.add('wizball_or_cat_fire_normal', { volume: 0.4 });
-    this.pickupSound = this.sound.add('bonus_pearl_pickup', { volume: 0.6 });
+    // Create sounds safely
+    this.bounceSound = this.safeAddSound('wizball_bounce', 0.5);
+    this.fireSound = this.safeAddSound('wizball_or_cat_fire_normal', 0.4);
+    this.pickupSound = this.safeAddSound('bonus_pearl_pickup', 0.6);
 
     // Create paint drop textures (generated, not loaded from files)
     this.createPaintTextures();
@@ -238,9 +242,6 @@ export default class GameScene extends Phaser.Scene {
     this.enemySystem.spawnInitialEnemies(this.currentLevel);
     this.totalEnemiesInLevel = this.enemySystem.getActiveEnemyCount();
 
-    // Setup input via InputManager (keyboard + gamepad)
-    this.inputManager = new InputManager(this);
-
     // Setup collisions
     this.setupCollisions();
 
@@ -257,6 +258,16 @@ export default class GameScene extends Phaser.Scene {
     // Initial velocity - C++ starts with a small downward push
     this.yVel = 2 * PRIVATE_SCALE;
     this.idealXVel = 0;
+  }
+
+  private safeAddSound(key: string, volume: number): Phaser.Sound.BaseSound {
+    try {
+      if (this.cache.audio.exists(key)) {
+        return this.sound.add(key, { volume });
+      }
+    } catch (_) { /* ignore */ }
+    // Return a no-op sound that won't crash when played
+    return { play: () => {}, isPlaying: false, destroy: () => {} } as any;
   }
 
   private createPaintTextures(): void {
