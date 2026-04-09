@@ -1,9 +1,11 @@
 import Phaser from 'phaser';
+import { SETTINGS } from '../types/game';
 import HiScoreSystem from '../systems/HiScoreSystem';
 
 export default class TitleScene extends Phaser.Scene {
   private titleText!: Phaser.GameObjects.Text;
   private startText!: Phaser.GameObjects.Text;
+  private settingsText!: Phaser.GameObjects.Text;
   private blinkTimer: number = 0;
   private showStart: boolean = true;
   private hiScoreSystem!: HiScoreSystem;
@@ -35,7 +37,7 @@ export default class TitleScene extends Phaser.Scene {
 
     this.createHiScoreTable();
 
-    this.startText = this.add.text(320, 340, 'PRESS SPACE TO START', {
+    this.startText = this.add.text(320, 330, 'PRESS SPACE TO START', {
       fontSize: '18px',
       color: '#ffffff',
       fontFamily: 'monospace',
@@ -44,8 +46,19 @@ export default class TitleScene extends Phaser.Scene {
     });
     this.startText.setOrigin(0.5);
 
+    // Settings option
+    this.settingsText = this.add.text(320, 370, 'S: Settings', {
+      fontSize: '12px',
+      color: '#888888',
+      fontFamily: 'monospace',
+    });
+    this.settingsText.setOrigin(0.5);
+
     const spaceKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
     spaceKey.on('down', this.startGame, this);
+
+    const settingsKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.S);
+    settingsKey.on('down', this.openSettings, this);
 
     if (this.cache.audio.exists('menu_select')) {
       this.sound.add('menu_select');
@@ -86,6 +99,11 @@ export default class TitleScene extends Phaser.Scene {
     }
 
     this.scene.start('GetReady', { level: 1 });
+  }
+
+  private openSettings(): void {
+    this.scene.launch(SETTINGS, { returnTo: 'Title' });
+    this.scene.bringToTop(SETTINGS);
   }
 
   update(): void {

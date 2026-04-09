@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { Settings } from './config/Settings';
 import BootScene from './scenes/BootScene';
 import PreloadScene from './scenes/PreloadScene';
 import TitleScene from './scenes/TitleScene';
@@ -6,12 +7,19 @@ import GetReadyScene from './scenes/GetReadyScene';
 import GameScene from './scenes/GameScene';
 import LaboratoryScene from './scenes/LaboratoryScene';
 import BonusLevelScene from './scenes/BonusLevelScene';
-import GameGameScene from './scenes/GameOverScene';
+import GameOverScene from './scenes/GameOverScene';
 import GameCompleteScene from './scenes/GameCompleteScene';
+import SettingsScene from './scenes/SettingsScene';
+import PauseScene from './scenes/PauseScene';
 
 // Game dimensions from C++ constants
 const GAME_WIDTH = 640;
 const GAME_HEIGHT = 416; // 368 playable + status bar
+
+// Read pixel art setting before game construction (requires restart to change)
+const settings = Settings.getInstance();
+settings.load();
+const usePixelArt = settings.getPixelArt();
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
@@ -26,8 +34,11 @@ const config: Phaser.Types.Core.GameConfig = {
       debug: false
     }
   },
-  scene: [BootScene, PreloadScene, TitleScene, GetReadyScene, GameScene, LaboratoryScene, BonusLevelScene, GameCompleteScene, GameGameScene],
-  pixelArt: true,
+  scene: [BootScene, PreloadScene, TitleScene, GetReadyScene, GameScene, LaboratoryScene, BonusLevelScene, GameCompleteScene, GameOverScene, SettingsScene, PauseScene],
+  pixelArt: usePixelArt,
+  input: {
+    gamepad: true
+  },
   scale: {
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.CENTER_BOTH,

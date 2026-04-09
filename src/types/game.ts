@@ -1,8 +1,9 @@
 export const BOOT = 'Boot';
 export const PRELOAD = 'Preload';
 export const GAME = 'Game';
-export const MAIN_MENU = 'MainMenu';
-export const GAME_SCENE = 'GameScene';
+export const TITLE = 'Title';
+export const SETTINGS = 'Settings';
+export const PAUSE = 'Pause';
 
 export enum PaintColor {
   RED = 0,

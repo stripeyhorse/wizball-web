@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
-import { GAME } from '../types/game';
+import { GAME, PAUSE } from '../types/game';
 import { WeaponFlag } from '../types/game';
+import { InputManager } from '../systems/InputManager';
 
 enum SpecialPaintballType {
   EXTRA_LIFE = 0,
@@ -101,9 +102,7 @@ enum WobbleDirection {
 
 export default class GameScene extends Phaser.Scene {
   private player!: Phaser.Physics.Arcade.Sprite;
-  private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
-  private fireKey!: Phaser.Input.Keyboard.Key;
-  private altFireKey!: Phaser.Input.Keyboard.Key;
+  private inputManager!: InputManager;
 
   // Wizball physics state (in fixed-point units scaled by 256)
   private xVel: number = 0;
@@ -239,14 +238,8 @@ export default class GameScene extends Phaser.Scene {
     this.enemySystem.spawnInitialEnemies(this.currentLevel);
     this.totalEnemiesInLevel = this.enemySystem.getActiveEnemyCount();
 
-    // Setup input
-    this.cursors = this.input.keyboard!.createCursorKeys();
-    this.fireKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
-    this.altFireKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.Z);
-    this.input.keyboard!.addCapture([
-      Phaser.Input.Keyboard.KeyCodes.SPACE,
-      Phaser.Input.Keyboard.KeyCodes.Z
-    ]);
+    // Setup input via InputManager (keyboard + gamepad)
+    this.inputManager = new InputManager(this);
 
     // Setup collisions
     this.setupCollisions();
@@ -1222,15 +1215,15 @@ export default class GameScene extends Phaser.Scene {
     }
 
     // C++ also allows FIRE_2 (secondary fire) to trigger bonus selection
-    if (Phaser.Input.Keyboard.JustDown(this.altFireKey)) {
+    if (this.inputManager.justDown('altFire')) {
       this.selectCurrentBonus();
       this.resetWobbleState();
       return;
     }
 
     // Use JustDown to detect single key presses (C++ IF_INPUT_PLAYER_CONTROL_HIT)
-    const leftPressed = Phaser.Input.Keyboard.JustDown(this.cursors.left!);
-    const rightPressed = Phaser.Input.Keyboard.JustDown(this.cursors.right!);
+    const leftPressed = this.inputManager.justDown('moveLeft');
+    const rightPressed = this.inputManager.justDown('moveRight');
 
     if (leftPressed) {
       if (this.wobbleNextDirection === WobbleDirection.EITHER || this.wobbleNextDirection === WobbleDirection.LEFT) {
@@ -1703,10 +1696,10 @@ export default class GameScene extends Phaser.Scene {
     // C++ basic_bounce: ideal_x_vel is in fixed-point (0-768), input adds 64 per frame
     const maxVel = WIZBALL_MAX_PIXEL_X_VEL * PRIVATE_SCALE; // 768
 
-    if (this.cursors.right.isDown) {
+    if (this.inputManager.isDown('moveRight')) {
       this.idealXVel = Math.min(this.idealXVel + WIZBALL_X_RESPONSIVENESS, maxVel);
     }
-    if (this.cursors.left.isDown) {
+    if (this.inputManager.isDown('moveLeft')) {
       this.idealXVel = Math.max(this.idealXVel - WIZBALL_X_RESPONSIVENESS, -maxVel);
     }
 
@@ -1717,10 +1710,10 @@ export default class GameScene extends Phaser.Scene {
   private updateControlledMovement(): void {
     const maxVel = WIZBALL_MAX_PIXEL_X_VEL * PRIVATE_SCALE; // 768
 
-    if (this.cursors.right.isDown) {
+    if (this.inputManager.isDown('moveRight')) {
       this.idealXVel = Math.min(this.idealXVel + WIZBALL_X_RESPONSIVENESS, maxVel);
     }
-    if (this.cursors.left.isDown) {
+    if (this.inputManager.isDown('moveLeft')) {
       this.idealXVel = Math.max(this.idealXVel - WIZBALL_X_RESPONSIVENESS, -maxVel);
     }
 
@@ -1736,10 +1729,10 @@ export default class GameScene extends Phaser.Scene {
 
     // X movement - C++ has TWO SEPARATE IF BLOCKS that BOTH run each frame
     // First block: RIGHT handling
-    if (this.cursors.right.isDown) {
+    if (this.inputManager.isDown('moveRight')) {
       this.xVel = Math.min(this.xVel + WIZBALL_X_RESPONSIVENESS, topPrivateVel);
     } else {
-      if (this.cursors.left.isDown) {
+      if (this.inputManager.isDown('moveLeft')) {
         // x_vel = x_vel (do nothing)
       } else {
         if (this.xVel > 0) {
@@ -1749,10 +1742,10 @@ export default class GameScene extends Phaser.Scene {
     }
 
     // Second block: LEFT handling
-    if (this.cursors.left.isDown) {
+    if (this.inputManager.isDown('moveLeft')) {
       this.xVel = Math.max(this.xVel - WIZBALL_X_RESPONSIVENESS, -topPrivateVel);
     } else {
-      if (this.cursors.right.isDown) {
+      if (this.inputManager.isDown('moveRight')) {
         // x_vel = x_vel (do nothing)
       } else {
         if (this.xVel < 0) {
@@ -1763,7 +1756,7 @@ export default class GameScene extends Phaser.Scene {
 
     // Y movement - C++ has TWO SEPARATE IF BLOCKS that BOTH run each frame
     // First block: DOWN handling
-    if (this.cursors.down.isDown) {
+    if (this.inputManager.isDown('moveDown')) {
       this.yVel = Math.min(this.yVel + WIZBALL_Y_RESPONSIVENESS, topPrivateVel);
     } else {
       if (this.yVel > 0) {
@@ -1772,7 +1765,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     // Second block: UP handling
-    if (this.cursors.up.isDown) {
+    if (this.inputManager.isDown('moveUp')) {
       this.yVel = Math.max(this.yVel - WIZBALL_Y_RESPONSIVENESS, -topPrivateVel);
     } else {
       if (this.yVel < 0) {
@@ -1847,16 +1840,16 @@ export default class GameScene extends Phaser.Scene {
       let cvx = 0;
       let cvy = 0;
 
-      if (this.cursors.left.isDown) {
+      if (this.inputManager.isDown('moveLeft')) {
         cvx = -controlledSpeed;
       }
-      if (this.cursors.right.isDown) {
+      if (this.inputManager.isDown('moveRight')) {
         cvx = controlledSpeed;
       }
-      if (this.cursors.up.isDown) {
+      if (this.inputManager.isDown('moveUp')) {
         cvy = -controlledSpeed;
       }
-      if (this.cursors.down.isDown) {
+      if (this.inputManager.isDown('moveDown')) {
         cvy = controlledSpeed;
       }
 
@@ -2068,15 +2061,22 @@ export default class GameScene extends Phaser.Scene {
   }
 
   update(): void {
+    // Pause
+    if (this.inputManager.justDown('pause')) {
+      this.scene.pause(GAME);
+      this.scene.launch(PAUSE);
+      return;
+    }
+
     this.checkBulletCollisions();
-    
+
     // C++ pattern: check fire_delay_counter FIRST, then handle input based on catellite presence
     if (this.fireCooldown > 0) {
       this.fireCooldown--;
     } else {
       const hasCatellite = (this.weaponCollection & WeaponFlag.CATELLITE) !== 0 && this.catellite.visible;
-      const firePressed = Phaser.Input.Keyboard.JustDown(this.fireKey) || Phaser.Input.Keyboard.JustDown(this.altFireKey);
-      const fireHeld = this.fireKey.isDown || this.altFireKey.isDown;
+      const firePressed = this.inputManager.justDown('fire') || this.inputManager.justDown('altFire');
+      const fireHeld = this.inputManager.isDown('fire') || this.inputManager.isDown('altFire');
       
       if (!hasCatellite) {
         // Without catellite: fire once per key press (HIT = JustDown)
@@ -2100,5 +2100,12 @@ export default class GameScene extends Phaser.Scene {
     this.warpTubeSystem.checkWarp(this.player);
     this.updateHUD();
     this.cleanupPaintDrops();
+
+    // Must be last — stores previous frame's button state for justDown detection
+    this.inputManager.update();
+  }
+
+  shutdown(): void {
+    this.inputManager?.destroy();
   }
 }
