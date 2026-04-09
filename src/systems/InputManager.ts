@@ -112,7 +112,14 @@ export class InputManager {
 
   destroy(): void {
     this.scene.game.events.off('settings:changed', this.rebuildKeys, this);
-    this.keys.forEach(key => key.destroy());
+    const keyboard = this.scene.input.keyboard;
+    this.keys.forEach(key => {
+      if (keyboard) {
+        keyboard.removeKey(key, true); // true = destroy the key object too
+      } else {
+        key.destroy();
+      }
+    });
     this.keys.clear();
   }
 

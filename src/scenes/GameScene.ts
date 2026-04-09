@@ -199,10 +199,11 @@ export default class GameScene extends Phaser.Scene {
       this.inputManager?.destroy();
     });
 
-    // C++ spin calculation: top_spin_angle = (wizball_radius << bitshift) % TWO_PI_PERCENT
-    // In C++, TWO_PI_PERCENT = 62831 (integer), so: (24 << 8) % 62831 = 6144 % 62831 = 6144
-    // Divider = 6144 / 64 = 96
-    this.topSpinAngle = (WIZBALL_RADIUS << BITSHIFT) % 62831;
+    // C++ spin calculation: top_spin_angle = (wizball_radius << bitshift) % two_pi_percent
+    // In the C++ scripting language, % is MATH_ADAPT_BY_PERCENTAGE = a * b / 10000
+    // = (24 << 8) * 62831 / 10000 = 6144 * 62831 / 10000 = 38590
+    // This equals the circumference in fixed-point units (2*PI*24*256/10000 scaled)
+    this.topSpinAngle = Math.trunc(((WIZBALL_RADIUS << BITSHIFT) * 62831) / 10000);
     this.spinAngleToFrameDivider = this.topSpinAngle / WIZBALL_FRAME_COUNT;
 
     // Create sounds safely
@@ -1375,42 +1376,35 @@ export default class GameScene extends Phaser.Scene {
 
     if (touchingDown || touchingUp) {
       if (this.movementStyle !== MovementStyle.FULL_CONTROLLED) {
-        // C++ bounce: snap x_vel to ideal, then recalculate y_vel from energy conservation
-        // All calculations in fixed-point units (like C++)
+        // C++ bounce: snap x_vel to ideal, then recalculate y_vel from distance
         this.xVel = Math.trunc(this.idealXVel);
 
-        // C++ engine reverses velocity BEFORE calling hit_floor_or_roof, so sgn(y_vel) gives bounce direction
-        // In our code, velocity isn't reversed yet, so we use the opposite direction
+        // C++ engine reverses velocity BEFORE calling hit_floor_or_roof
+        // sgn(y_vel) after reversal gives bounce direction
         const bounceDirection = touchingDown ? -1 : 1;
-        
-        // C++ physics: s = (a*t^2)/2, so t = sqrt(2*s/a)
-        // All in fixed-point units
+
+        // C++ physics: s = (a*t^2)/2, solve for t = sqrt(2s/a), then v = a*t
+        // All in fixed-point units (raw C++ values, not divided by 256)
         const startYFixed = WIZBALL_START_Y * PRIVATE_SCALE;
-        const distanceFallenFixed = Math.abs(this.playerYFixed - startYFixed);  // fixed-point
-        const sFixed = distanceFallenFixed * 2;  // fixed-point
-        const gravFixed = WIZBALL_GRAVITY_STRENGTH;  // 48 in fixed-point (raw C++ value)
-        
-        // t = sqrt(2s/a) - all in fixed-point, result is frames
+        const distanceFallenFixed = Math.abs(this.playerYFixed - startYFixed);
+        const sFixed = distanceFallenFixed * 2;
+        const gravFixed = WIZBALL_GRAVITY_STRENGTH; // 48 (raw fixed-point)
+
         const t = Math.sqrt(sFixed / gravFixed);
-        
-        // y_vel = a * t * bounceDirection
-        let newYVel = Math.trunc(gravFixed * t) * bounceDirection;
+        const newYVel = Math.trunc(gravFixed * t) * bounceDirection;
 
-        // Ensure minimum bounce speed (768 in fixed-point = 3 pixels)
-        const minBounceFixed = 768;
-        if (Math.abs(newYVel) < minBounceFixed) {
-          newYVel = minBounceFixed * bounceDirection;
-        }
-
+        // C++ does NOT apply minimum bounce speed in basic/controlled modes
+        // The distance formula naturally maintains bounce height
         this.yVel = newYVel;
       } else {
-        // Full controlled: simple reflect with minimum speed
-        const absY = Math.abs(this.yVel);
-        const minBounceFixed = 768;
-        if (absY < minBounceFixed) {
-          this.yVel = touchingDown ? -minBounceFixed : minBounceFixed;
-        } else {
-          this.yVel = -this.yVel;
+        // Full controlled: C++ engine reverses velocity, then script ensures minimum
+        // We reverse ourselves since there's no engine pre-reversal
+        this.yVel = -this.yVel;
+
+        // C++ only applies minimum bounce speed in full_controlled mode
+        const minBounceFixed = 768; // WIZBALL_MINIMUM_VERTICAL_BOUNCE_SPEED
+        if (Math.abs(this.yVel) < minBounceFixed) {
+          this.yVel = (touchingDown ? -1 : 1) * minBounceFixed;
         }
       }
 
@@ -1420,26 +1414,29 @@ export default class GameScene extends Phaser.Scene {
     }
 
     if (touchingLeft || touchingRight) {
+      // C++ engine reverses x_vel FIRST (coef = -100%), then script runs
+      // Simulate the engine reversal
+      this.xVel = -this.xVel;
+
       if (this.movementStyle === MovementStyle.BASIC_BOUNCE) {
-        // C++: if ideal and actual velocity have opposite signs, reflect ideal
-        // Both are in fixed-point for comparison
+        // C++ basic_bounce: check if ideal and (now-reversed) x_vel have opposite signs
         const idealFixed = Math.trunc(this.idealXVel);
         const product = idealFixed * this.xVel;
-        
+
         if (product < 0) {
+          // Opposite signs: invert ideal
           this.xVel = -idealFixed;
           this.idealXVel = this.xVel;
         } else {
+          // Same sign: use ideal
           this.xVel = idealFixed;
         }
       } else {
-        // Controlled/full: reflect with minimum speed
-        const absX = Math.abs(this.xVel);
-        const minBounceFixed = 512;  // 2 pixels in fixed-point
-        if (absX < minBounceFixed) {
-          this.xVel = touchingLeft ? minBounceFixed : -minBounceFixed;
-        } else {
-          this.xVel = -this.xVel;
+        // Controlled/full: ensure minimum horizontal bounce speed
+        const minBounceFixed = 512; // WIZBALL_MINIMUM_HORIZONTAL_BOUNCE_SPEED
+        if (Math.abs(this.xVel) < minBounceFixed) {
+          const dir = this.xVel >= 0 ? 1 : -1; // sgn of already-reversed velocity
+          this.xVel = dir * minBounceFixed;
         }
         this.idealXVel = this.xVel;
       }
@@ -1652,14 +1649,9 @@ export default class GameScene extends Phaser.Scene {
     }
 
     // C++ top_private_vel = WIZBALL_MAX_PIXEL_X_VEL << Bitshift = 3 << 8 = 768
-    // Used for both X and Y clamping in full_controlled mode
-    const topPrivateVel = WIZBALL_MAX_PIXEL_X_VEL * PRIVATE_SCALE; // 768
-
-    // Clamp velocities - C++ uses top_private_vel (768) for both axes
-    const maxX = topPrivateVel;
-    const maxY = topPrivateVel;
-    this.xVel = Phaser.Math.Clamp(this.xVel, -maxX, maxX);
-    this.yVel = Phaser.Math.Clamp(this.yVel, -maxY, maxY);
+    // Input functions clamp idealXVel and x_vel to ±768 via !> and !< operators
+    // y_vel is NOT clamped by the script — only by the engine's internal limits
+    // The bounce formula can produce y_vel of ~2800 for full-height bounces
 
     // CRITICAL: disable arcade physics BEFORE custom physics update runs
     // Otherwise arcade physics applies its own velocity on top of the custom physics
