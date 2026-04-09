@@ -27,6 +27,12 @@ const config: Phaser.Types.Core.GameConfig = {
   height: GAME_HEIGHT,
   parent: 'game-container',
   backgroundColor: '#000000',
+  // C++ remake runs at 60fps (BPS_TO_TIMER(60)) — lock to match
+  // Without this, high-refresh monitors (120/144/240hz) run physics too fast
+  fps: {
+    target: 60,
+    forceSetTimeOut: false
+  },
   physics: {
     default: 'arcade',
     arcade: {
