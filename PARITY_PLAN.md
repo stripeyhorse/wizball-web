@@ -354,7 +354,7 @@ this.hudText.setScrollFactor(0);
 
 ### Audio ✅ COMPLETE
 - [x] All 44 sounds loaded
-- [ ] Music (title, game, bonus, lab) - no music files in assets
+- [x] Music (title, in-game, laboratory, bonus, pre-life, completion, game-over, hi-score) — 8 MP3 streams loaded and wired per scene
 
 ---
 

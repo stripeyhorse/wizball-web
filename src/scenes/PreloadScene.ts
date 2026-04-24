@@ -155,6 +155,21 @@ export default class PreloadScene extends Phaser.Scene {
     for (const sound of soundFiles) {
       this.load.audio(sound, `assets/${sound}.wav`);
     }
+
+    // Music (C++ streams/*.mp3)
+    const musicFiles = [
+      'wizball_title',
+      'wizball_in_game',
+      'wizball_laboratory',
+      'wizball_bonus',
+      'wizball_pre_life',
+      'wizball_completion',
+      'wizball_game_over',
+      'wizball_hi_score',
+    ];
+    for (const music of musicFiles) {
+      this.load.audio(music, `assets/${music}.mp3`);
+    }
   }
 
   create(): void {

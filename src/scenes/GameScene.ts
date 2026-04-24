@@ -35,6 +35,7 @@ import CauldronSystem from '../systems/CauldronSystem';
 import EnemySystem from '../systems/EnemySystem';
 import HUDSystem, { HUDState } from '../systems/HUDSystem';
 import WarpTubeSystem from '../systems/WarpTubeSystem';
+import { playSceneMusic } from '../systems/MusicManager';
 
 // Wizball constants from C++ code (fixed point math, scaled by 256)
 // In C++, all velocity/acceleration values are in fixed-point (1/256 pixel units)
@@ -268,6 +269,8 @@ export default class GameScene extends Phaser.Scene {
     // Initial velocity - C++ starts with a small downward push
     this.yVel = 2 * PRIVATE_SCALE;
     this.idealXVel = 0;
+
+    playSceneMusic(this, 'wizball_in_game');
   }
 
   private safeAddSound(key: string, volume: number): Phaser.Sound.BaseSound {

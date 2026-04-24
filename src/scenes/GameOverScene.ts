@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { GAME } from '../types/game';
 import HiScoreSystem from '../systems/HiScoreSystem';
+import { playSceneMusic, type SceneMusic } from '../systems/MusicManager';
 
 export default class GameOverScene extends Phaser.Scene {
   private score: number = 0;
@@ -15,6 +16,7 @@ export default class GameOverScene extends Phaser.Scene {
   private nameInput: string = '';
   private nameText!: Phaser.GameObjects.Text;
   private enteringName: boolean = false;
+  private currentMusic: SceneMusic | null = null;
 
   constructor() {
     super({ key: 'GameOver' });
@@ -73,10 +75,19 @@ export default class GameOverScene extends Phaser.Scene {
     if (this.cache.audio.exists('wizball_explode')) {
       this.sound.add('wizball_explode', { volume: 0.7 }).play();
     }
+
+    this.currentMusic = playSceneMusic(this, 'wizball_game_over', { loop: false });
   }
 
   private showNameEntry(): void {
     this.enteringName = true;
+
+    // Switch to hi-score music during name entry
+    if (this.currentMusic) {
+      this.currentMusic.stop();
+      this.currentMusic = null;
+    }
+    this.currentMusic = playSceneMusic(this, 'wizball_hi_score');
 
     this.add.text(320, 200, 'NEW HIGH SCORE!', {
       fontSize: '20px',

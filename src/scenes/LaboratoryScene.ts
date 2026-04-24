@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { GAME } from '../types/game';
 import { WeaponFlag } from '../types/game';
+import { playSceneMusic } from '../systems/MusicManager';
 
 interface UpgradeOption {
   frame: string;
@@ -79,6 +80,8 @@ export default class LaboratoryScene extends Phaser.Scene {
     if (this.cache.audio.exists('permanent_upgrade_selected')) {
       this.sound.add('permanent_upgrade_selected', { volume: 0.6 });
     }
+
+    playSceneMusic(this, 'wizball_laboratory');
   }
 
   private buildOptions(): UpgradeOption[] {

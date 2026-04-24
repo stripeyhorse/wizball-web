@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { playSceneMusic } from '../systems/MusicManager';
 
 export default class BonusLevelScene extends Phaser.Scene {
   private score: number = 0;
@@ -55,6 +56,8 @@ export default class BonusLevelScene extends Phaser.Scene {
     if (this.cache.audio.exists('bonus_selection')) {
       this.sound.add('bonus_selection', { volume: 0.5 }).play();
     }
+
+    playSceneMusic(this, 'wizball_bonus');
   }
 
   private createStarfield(): void {

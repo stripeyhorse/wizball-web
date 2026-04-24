@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { SETTINGS } from '../types/game';
 import HiScoreSystem from '../systems/HiScoreSystem';
+import { playSceneMusic } from '../systems/MusicManager';
 
 export default class TitleScene extends Phaser.Scene {
   private titleText!: Phaser.GameObjects.Text;
@@ -65,6 +66,8 @@ export default class TitleScene extends Phaser.Scene {
     if (this.cache.audio.exists('menu_select')) {
       this.sound.add('menu_select');
     }
+
+    playSceneMusic(this, 'wizball_title');
   }
 
   private createHiScoreTable(): void {

@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { GAME } from '../types/game';
+import { playSceneMusic } from '../systems/MusicManager';
 
 export default class GetReadyScene extends Phaser.Scene {
   private level: number = 1;
@@ -55,6 +56,8 @@ export default class GetReadyScene extends Phaser.Scene {
     if (this.cache.audio.exists('menu_select')) {
       this.sound.add('menu_select', { volume: 0.5 });
     }
+
+    playSceneMusic(this, 'wizball_pre_life', { loop: false });
   }
 
   private createStarfield(): void {
