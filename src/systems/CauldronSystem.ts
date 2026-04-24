@@ -129,14 +129,14 @@ export default class CauldronSystem {
   }
 
   private positionCauldrons(): void {
-    // Position cauldrons in bottom status bar (matching original layout)
-    // Original: 4 cauldrons spread across bottom-left of screen
-    const y = 392; // Bottom bar center (368 + 24)
-
-    this.cauldrons[0].position = { x: 80, y };
-    this.cauldrons[1].position = { x: 160, y };
-    this.cauldrons[2].position = { x: 240, y };
-    this.cauldrons[3].position = { x: 320, y };
+    // Cauldrons live in the left-center of the bottom status panel (y 368–415),
+    // between the LIVES text and the weapon-icons row. Tight packing keeps room
+    // for hi-score, paint, and level indicators on the right.
+    const y = 393;
+    this.cauldrons[0].position = { x: 96, y };   // Red
+    this.cauldrons[1].position = { x: 138, y };  // Green
+    this.cauldrons[2].position = { x: 180, y };  // Blue
+    this.cauldrons[3].position = { x: 232, y };  // Combination (slightly detached)
   }
 
   private renderCauldrons(): void {
@@ -149,18 +149,51 @@ export default class CauldronSystem {
       const color = this.getCauldronRGB(cauldron.color);
       const colorInt = (color.r << 16) | (color.g << 8) | color.b;
 
-      const bowl = this.scene.add.ellipse(0, 4, 38, 22, 0x101820, 1);
-      bowl.setStrokeStyle(2, 0x6a5a3a);
+      // Cauldron body (dark iron pot) - tall rounded shape, 40w x 30h
+      const bodyW = 40;
+      const bodyH = 30;
+      const body = this.scene.add.graphics();
+      body.fillStyle(0x1a1a22, 1);
+      body.fillRoundedRect(-bodyW / 2, -bodyH / 2 + 4, bodyW, bodyH, { tl: 6, tr: 6, bl: 12, br: 12 });
+      body.lineStyle(2, 0x44444c, 1);
+      body.strokeRoundedRect(-bodyW / 2, -bodyH / 2 + 4, bodyW, bodyH, { tl: 6, tr: 6, bl: 12, br: 12 });
 
-      const liquidBack = this.scene.add.ellipse(0, 0, 26, 10, 0x041018, 1);
-      const fillWidth = 8 + (cauldron.fillLevel / cauldron.maxCapacity) * 18;
-      const fill = this.scene.add.ellipse(0, 0, fillWidth, 8, colorInt, 0.85);
-      const rim = this.scene.add.ellipse(0, -1, 30, 12, 0x1b1f28, 1);
-      rim.setStrokeStyle(2, 0xb0b7c8);
-      const shine = this.scene.add.ellipse(-6, -3, 10, 4, 0xffffff, 0.15);
-      const glow = this.scene.add.ellipse(0, 0, 34, 16, colorInt, 0.18);
+      // Liquid fill from bottom up (vertical fill)
+      const fillRatio = Math.min(1, cauldron.fillLevel / cauldron.maxCapacity);
+      const liquidMaxH = bodyH - 10; // leave room for rim
+      const liquidH = liquidMaxH * fillRatio;
+      const liquidW = bodyW - 8;
+      if (liquidH > 0) {
+        const liquid = this.scene.add.graphics();
+        liquid.fillStyle(colorInt, 0.9);
+        liquid.fillRect(-liquidW / 2, bodyH / 2 - 2 - liquidH, liquidW, liquidH);
+        // Surface highlight
+        liquid.fillStyle(0xffffff, 0.25);
+        liquid.fillRect(-liquidW / 2, bodyH / 2 - 2 - liquidH, liquidW, 2);
+        container.add(liquid);
+      }
 
-      container.add([glow, bowl, liquidBack, fill, rim, shine]);
+      // Rim
+      const rim = this.scene.add.graphics();
+      rim.fillStyle(0x686874, 1);
+      rim.fillRect(-bodyW / 2 - 3, -bodyH / 2 + 2, bodyW + 6, 4);
+      rim.lineStyle(1, 0x2a2a30, 1);
+      rim.strokeRect(-bodyW / 2 - 3, -bodyH / 2 + 2, bodyW + 6, 4);
+
+      // Side handles
+      const handles = this.scene.add.graphics();
+      handles.lineStyle(2, 0x686874, 1);
+      handles.strokeCircle(-bodyW / 2 - 4, -bodyH / 2 + 4, 3);
+      handles.strokeCircle(bodyW / 2 + 4, -bodyH / 2 + 4, 3);
+
+      // Glow (colour aura when filled)
+      if (fillRatio > 0) {
+        const glow = this.scene.add.ellipse(0, -bodyH / 2 + 2, bodyW + 8, 6, colorInt, 0.35 * fillRatio);
+        container.add(glow);
+      }
+
+      container.add([body, rim, handles]);
+      // Re-order so rim stays above liquid
       container.setDepth(100);
       container.setScrollFactor(0);
 

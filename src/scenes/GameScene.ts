@@ -34,6 +34,7 @@ import BonusSelectionPanelSystem from '../systems/BonusSelectionPanelSystem';
 import CauldronSystem from '../systems/CauldronSystem';
 import EnemySystem from '../systems/EnemySystem';
 import HUDSystem, { HUDState } from '../systems/HUDSystem';
+import HiScoreSystem from '../systems/HiScoreSystem';
 import WarpTubeSystem from '../systems/WarpTubeSystem';
 import { playSceneMusic } from '../systems/MusicManager';
 
@@ -296,6 +297,41 @@ export default class GameScene extends Phaser.Scene {
       g.fillCircle(8, 8, 6);
       g.generateTexture(key, 16, 16);
       g.destroy();
+    }
+
+    // Special-paintball pickups (EXTRA_LIFE, FILTH_RAID, FREAKY_BITS, INDESTRUCTACAT, MUTANT_CAT).
+    // Original C++ uses sprite atlas frames; we synthesise readable emblem textures so
+    // each pickup type is visually distinct and always renders even if atlas assets
+    // haven't been converted.
+    const specials: Array<{ key: string; bg: number; rim: number; glyph: number; letter: string }> = [
+      { key: 'sp_extra_life',     bg: 0xff2255, rim: 0xffccdd, glyph: 0xffffff, letter: '+1' },
+      { key: 'sp_filth_raid',     bg: 0x885522, rim: 0xffaa55, glyph: 0xffffff, letter: 'F'  },
+      { key: 'sp_freaky_bits',    bg: 0xaa22ff, rim: 0xddaaff, glyph: 0xffffff, letter: '?'  },
+      { key: 'sp_indestructacat', bg: 0x22aaff, rim: 0xaaddff, glyph: 0xffffff, letter: 'I'  },
+      { key: 'sp_mutant_cat',     bg: 0x22ff66, rim: 0xaaffcc, glyph: 0x003311, letter: 'M'  },
+    ];
+
+    const size = 32;
+    for (const { key, bg, rim, glyph, letter } of specials) {
+      if (this.textures.exists(key)) continue;
+      const rt = this.make.renderTexture({ width: size, height: size }, false);
+      const g = this.add.graphics();
+      g.fillStyle(bg, 1);
+      g.fillCircle(size / 2, size / 2, size / 2 - 2);
+      g.lineStyle(2, rim, 1);
+      g.strokeCircle(size / 2, size / 2, size / 2 - 2);
+      g.fillStyle(0xffffff, 0.35);
+      g.fillCircle(size / 2 - 6, size / 2 - 6, 4);
+      rt.draw(g);
+      g.destroy();
+      const text = this.make.text({
+        x: 0, y: 0, text: letter,
+        style: { fontFamily: 'monospace', fontSize: letter.length > 1 ? '12px' : '16px', color: '#' + glyph.toString(16).padStart(6, '0'), fontStyle: 'bold' },
+      }, false);
+      rt.draw(text, (size - text.width) / 2, (size - text.height) / 2);
+      text.destroy();
+      rt.saveTexture(key);
+      rt.destroy();
     }
   }
 
@@ -691,7 +727,11 @@ export default class GameScene extends Phaser.Scene {
     this.textures.get(tilesKey)?.setFilter(Phaser.Textures.FilterMode.NEAREST);
 
     this.worldWidth = parsedTilemap.width * TILE_SIZE;
-    this.worldHeight = parsedTilemap.height * TILE_SIZE;
+    // C++ constants: LEVEL_HEIGHT = 368, BONUS_LEVEL_HEIGHT = 416.
+    // Tilemap is 416 tall but the bottom 48px are the status-panel tile zone
+    // (not part of the accessible play area). Constrain the world so the player
+    // and enemies can't enter the HUD strip.
+    this.worldHeight = 368;
 
     // Background
     const bgKey = `background_level_${this.currentLevel}`;
@@ -992,16 +1032,16 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private spawnSpecialPaintball(x: number, y: number, type: SpecialPaintballType): void {
-    const frameMap: Record<SpecialPaintballType, string> = {
-      [SpecialPaintballType.EXTRA_LIFE]: 'special_paintball_pickup_extra_life',
-      [SpecialPaintballType.FILTH_RAID]: 'special_paintball_pickup_filth_raid',
-      [SpecialPaintballType.FREAKY_BITS]: 'special_paintball_pickup_freaky_bits',
-      [SpecialPaintballType.INDESTRUCTACAT]: 'special_paintball_pickup_indestructacat',
-      [SpecialPaintballType.MUTANT_CAT]: 'special_paintball_pickup_mutant_cat',
+    const textureMap: Record<SpecialPaintballType, string> = {
+      [SpecialPaintballType.EXTRA_LIFE]: 'sp_extra_life',
+      [SpecialPaintballType.FILTH_RAID]: 'sp_filth_raid',
+      [SpecialPaintballType.FREAKY_BITS]: 'sp_freaky_bits',
+      [SpecialPaintballType.INDESTRUCTACAT]: 'sp_indestructacat',
+      [SpecialPaintballType.MUTANT_CAT]: 'sp_mutant_cat',
     };
 
-    const frame = frameMap[type] || frameMap[SpecialPaintballType.EXTRA_LIFE];
-    const sprite = this.physics.add.sprite(x, y, 'special_paintballs', frame);
+    const textureKey = textureMap[type] ?? textureMap[SpecialPaintballType.EXTRA_LIFE];
+    const sprite = this.physics.add.sprite(x, y, textureKey);
     sprite.setDepth(12);
     sprite.setDisplaySize(32, 32);
     sprite.setBounce(0.5, 0.5);
@@ -1596,15 +1636,18 @@ export default class GameScene extends Phaser.Scene {
     this.paintIndicator.setVisible(false);
 
     // Initialize HUD system (draws top and bottom bars)
+    const hiScore = new HiScoreSystem().getTopScore();
     const initialState: HUDState = {
       score: this.score,
+      hiScore,
       lives: this.lives,
       cauldronFill: this.cauldronFill,
       currentPaintColor: this.paintColor,
       hasPaint: this.hasPaint,
       hasCatellite: (this.weaponCollection & WeaponFlag.CATELLITE) !== 0,
       catelliteHasShield: this.catelliteHasShield,
-      currentLevel: this.currentLevel
+      currentLevel: this.currentLevel,
+      weaponCollection: this.weaponCollection,
     };
     this.hudSystem = new HUDSystem(this, initialState);
 
@@ -1944,7 +1987,8 @@ export default class GameScene extends Phaser.Scene {
       hasPaint: this.hasPaint,
       hasCatellite: (this.weaponCollection & WeaponFlag.CATELLITE) !== 0,
       catelliteHasShield: this.catelliteHasShield,
-      currentLevel: this.currentLevel
+      currentLevel: this.currentLevel,
+      weaponCollection: this.weaponCollection,
     });
 
     this.cauldronSystem.setFillLevels(this.cauldronFill);

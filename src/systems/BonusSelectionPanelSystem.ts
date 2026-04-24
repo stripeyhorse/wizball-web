@@ -1,9 +1,12 @@
 import Phaser from 'phaser';
 import { WeaponFlag } from '../types/game';
 
-const PANEL_X = 8;
-const PANEL_Y = 8;
-const PANEL_SPACING = 48;
+// Rendered inside the bottom status panel (y=368–415), between the score/lives
+// block and the cauldrons. Each icon is 24×24 with 2px gap.
+const PANEL_X = 256;
+const PANEL_Y = 372;
+const PANEL_SPACING = 26;
+const ICON_SIZE = 24;
 
 const FRAME_EMPTY = 'panel_icons_21';
 const FRAME_LATERAL = 'panel_icons_11';
@@ -30,8 +33,9 @@ export default class BonusSelectionPanelSystem {
     for (let i = 0; i < 7; i++) {
       const icon = this.scene.add.image(PANEL_X + i * PANEL_SPACING, PANEL_Y, 'panel_icons', FRAME_EMPTY);
       icon.setOrigin(0, 0);
+      icon.setDisplaySize(ICON_SIZE, ICON_SIZE);
       icon.setScrollFactor(0);
-      icon.setDepth(1);
+      icon.setDepth(100);
       this.icons.push(icon);
     }
   }
