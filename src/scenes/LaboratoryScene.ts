@@ -196,7 +196,9 @@ export default class LaboratoryScene extends Phaser.Scene {
     };
 
     if (this.levelProgress >= 3) {
-      // Level fully done (all 3 colour stages). Advance, or finish the game.
+      // Level fully done (all 3 colour stages). C++ flythru.txt:35 awards +7490
+      // for the fly-through to the next level. Advance, or finish the game.
+      this.score += 7490;
       if (this.level >= 8) {
         this.scene.start('GameComplete', { score: this.score, level: this.level });
         return;

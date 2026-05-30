@@ -11,7 +11,18 @@ export interface HUDState {
   catelliteHasShield: boolean;
   currentLevel: number;
   weaponCollection: number;
+  // Remaining on-screen enemy/pearl count shown as a 3-digit readout in the
+  // status panel (mirrors the C++ enemy_count_digit display). Optional —
+  // defaults to 0 when absent.
+  enemyCount?: number;
 }
+
+// C++ reference (wizball_life_indicator): the life count is drawn as a single
+// Wizball sprite-icon whose frame = base_frame + player_lives, where
+// base_frame = 74, clamped to a max frame of 91. We reproduce that here using
+// the 'wizball' spritesheet (48x48 frames, 10x10 grid = 100 frames).
+const LIFE_ICON_BASE_FRAME = 74;
+const LIFE_ICON_MAX_FRAME = 91;
 
 // Match original Wizball layout:
 //   Play area: y=0..367  (full height, 23 tile rows)
@@ -30,7 +41,10 @@ export default class HUDSystem {
 
   private scoreText!: Phaser.GameObjects.Text;
   private hiScoreText!: Phaser.GameObjects.Text;
+  private lifeIcon!: Phaser.GameObjects.Image;
   private livesText!: Phaser.GameObjects.Text;
+  private enemyCountLabel!: Phaser.GameObjects.Text;
+  private enemyCountText!: Phaser.GameObjects.Text;
   private paintLabel!: Phaser.GameObjects.Text;
   private paintIndicator!: Phaser.GameObjects.Rectangle;
   private catelliteStatus!: Phaser.GameObjects.Text;
@@ -65,11 +79,30 @@ export default class HUDSystem {
     });
     this.hiScoreText.setScrollFactor(0).setDepth(100);
 
-    // Lives (left, bottom)
-    this.livesText = this.scene.add.text(6, PANEL_Y + 36, '', {
-      fontSize: '11px', color: '#ffff44', fontFamily: 'monospace',
+    // Lives (left, bottom) — Wizball sprite-icon counter (C++ parity).
+    // A single 48x48 wizball frame, scaled down to ~16px and shown next to an
+    // "xN" multiplier so the count stays readable even though the icon's frame
+    // itself already encodes the remaining lives.
+    this.lifeIcon = this.scene.add.image(13, PANEL_Y + 40, 'wizball', LIFE_ICON_BASE_FRAME);
+    this.lifeIcon.setDisplaySize(16, 16);
+    this.lifeIcon.setScrollFactor(0).setDepth(100);
+
+    this.livesText = this.scene.add.text(24, PANEL_Y + 34, '', {
+      fontSize: '11px', color: '#ffff44', fontFamily: 'monospace', fontStyle: 'bold',
     });
     this.livesText.setScrollFactor(0).setDepth(100);
+
+    // Enemy / pearl count (centre of panel) — 3-digit readout (C++ parity).
+    this.enemyCountLabel = this.scene.add.text(GAME_WIDTH / 2 - 30, PANEL_Y + 6, 'ENEMIES', {
+      fontSize: '9px', color: '#aaaaaa', fontFamily: 'monospace',
+    });
+    this.enemyCountLabel.setScrollFactor(0).setDepth(100);
+
+    this.enemyCountText = this.scene.add.text(GAME_WIDTH / 2, PANEL_Y + 20, '', {
+      fontSize: '18px', color: '#ff6644', fontFamily: 'monospace', fontStyle: 'bold',
+      stroke: '#440000', strokeThickness: 2,
+    }).setOrigin(0.5, 0);
+    this.enemyCountText.setScrollFactor(0).setDepth(100);
 
     // Paint indicator (top-right of panel, small swatch)
     this.paintLabel = this.scene.add.text(GAME_WIDTH - 60, PANEL_Y + 6, 'PAINT', {
@@ -99,7 +132,17 @@ export default class HUDSystem {
   public update(): void {
     this.scoreText.setText(this.state.score.toString().padStart(7, '0'));
     this.hiScoreText.setText(`HI ${this.state.hiScore.toString().padStart(7, '0')}`);
-    this.livesText.setText(`LIVES ${this.state.lives}`);
+
+    // Life indicator: frame = 74 + lives, clamped to the C++ max of 91.
+    const lives = Math.max(0, this.state.lives);
+    const lifeFrame = Math.min(LIFE_ICON_BASE_FRAME + lives, LIFE_ICON_MAX_FRAME);
+    this.lifeIcon.setFrame(lifeFrame);
+    this.livesText.setText(`x${lives}`);
+
+    // Enemy / pearl count: 3-digit readout, defaults to 0 when absent.
+    const enemyCount = Math.max(0, this.state.enemyCount ?? 0);
+    this.enemyCountText.setText(Math.min(enemyCount, 999).toString().padStart(3, '0'));
+
     this.levelText.setText(`L${this.state.currentLevel}`);
 
     if (this.state.hasPaint) {
@@ -134,7 +177,10 @@ export default class HUDSystem {
   public destroy(): void {
     this.scoreText.destroy();
     this.hiScoreText.destroy();
+    this.lifeIcon.destroy();
     this.livesText.destroy();
+    this.enemyCountLabel.destroy();
+    this.enemyCountText.destroy();
     this.paintIndicator.destroy();
     this.paintLabel.destroy();
     this.catelliteStatus.destroy();

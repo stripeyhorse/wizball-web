@@ -151,7 +151,9 @@ export default class GameScene extends Phaser.Scene {
 
   // Game state
   private lives: number = 2;
-  private lastScoreSector: number = 0; // C++ awards a life each 100k crossed
+  private displayScore: number = 0; // C++ player_display_score: rolls toward score
+  private scoreTickThrottle: number = 0;
+  private lastScoreSector: number = 0; // C++ awards a life each 100k crossed (on display score)
   private respawnInvulnFrames: number = 0; // post-death grace window (new-life appear)
   private paintColor: number = 0;
   private hasPaint: boolean = false;
@@ -213,6 +215,7 @@ export default class GameScene extends Phaser.Scene {
     this.score = data.score ?? 0;
     this.weaponCollection = data.weaponCollection ?? 0;
     this.lives = data.lives ?? this.lives;
+    this.displayScore = this.score; // start the rolling display at the carried score
     this.lastScoreSector = Math.floor(this.score / 100000); // don't re-award on continue
     // levelProgress + cauldronFill resume across bonus→lab→same-level (C++ colour
     // stages); a fresh level starts both at zero.
@@ -1609,7 +1612,12 @@ export default class GameScene extends Phaser.Scene {
     this.paintIndicator.fillColor = PAINT_FRAME_COLORS[color];
     this.paintIndicator.setAlpha(1);
 
-    this.pickupSound.play();
+    // C++ paintdrop pickup SFX (falls back to the generic pickup if absent).
+    if (this.cache.audio.exists('paintdrop_collection')) {
+      this.sound.play('paintdrop_collection', { volume: 0.5 });
+    } else {
+      this.pickupSound.play();
+    }
 
     // A fresh deposit may complete the current colour-match stage.
     this.checkLevelCompletion();
@@ -1839,10 +1847,25 @@ export default class GameScene extends Phaser.Scene {
   // frame and resets whenever an enemy is killed. If it reaches zero (you've gone
   // ~45s without a kill) a Fuzz spawns from the side you're heading toward, to
   // nudge you along.
-  // C++ manage_score_and_enemy_display.txt: a life is granted each time the score
-  // crosses a 100,000 boundary (capped at 9 by function_gain_life).
+  // C++ manage_score_and_enemy_display.txt:30-50 — the displayed score rolls
+  // toward the real score in +10/+100/+500 steps with three tiers of tick sound.
+  private updateDisplayScore(): void {
+    if (this.displayScore >= this.score) { this.displayScore = this.score; return; }
+    const gap = this.score - this.displayScore;
+    const step = gap > 5000 ? 500 : gap > 500 ? 100 : 10;
+    this.displayScore = Math.min(this.score, this.displayScore + step);
+    // Throttle the tick SFX so a big jump doesn't machine-gun the mixer.
+    if ((this.scoreTickThrottle++ % 3) === 0) {
+      const key = step === 500 ? 'score_counter_high_tick'
+        : step === 100 ? 'score_counter_medium_tick' : 'score_counter_low_tick';
+      if (this.cache.audio.exists(key)) this.sound.play(key, { volume: 0.2 });
+    }
+  }
+
+  // C++ manage_score_and_enemy_display.txt: a life is granted each time the DISPLAY
+  // score crosses a 100,000 boundary (capped at 9 by function_gain_life).
   private checkExtraLife(): void {
-    const sector = Math.floor(this.score / 100000);
+    const sector = Math.floor(this.displayScore / 100000);
     if (sector > this.lastScoreSector) {
       this.lives = Math.min(9, this.lives + (sector - this.lastScoreSector));
       this.lastScoreSector = sector;
@@ -2180,7 +2203,7 @@ export default class GameScene extends Phaser.Scene {
   private updateHUD(): void {
     // Update HUD system (draws score, lives, paint, catellite in top/bottom bars)
     this.hudSystem.setState({
-      score: this.score,
+      score: this.displayScore, // rolling display score (C++ player_display_score)
       lives: this.lives,
       cauldronFill: this.cauldronFill,
       currentPaintColor: this.paintColor,
@@ -2189,6 +2212,7 @@ export default class GameScene extends Phaser.Scene {
       catelliteHasShield: this.catelliteHasShield,
       currentLevel: this.currentLevel,
       weaponCollection: this.weaponCollection,
+      enemyCount: this.enemySystem.getActiveEnemyCount(),
     });
 
     this.cauldronSystem.setFillLevels(this.cauldronFill);
@@ -2324,6 +2348,7 @@ export default class GameScene extends Phaser.Scene {
     this.updateCatellite();
     this.enemySystem.update();
     this.updateFuzzCounter();
+    this.updateDisplayScore();
     this.checkExtraLife();
     if (this.respawnInvulnFrames > 0) this.respawnInvulnFrames--;
     this.warpTubeSystem.update();
