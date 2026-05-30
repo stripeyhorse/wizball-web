@@ -600,9 +600,8 @@ export default class GameScene extends Phaser.Scene {
     text.setScrollFactor(0);
     text.setDepth(200);
 
-    if (this.cache.audio.exists('level_complete')) {
-      this.sound.play('level_complete');
-    }
+    // (No 'level_complete' SFX exists in the original or the assets — the
+    // section-clear cue is spawn_new_wave_sound, played in handlePostEnemyRemoval.)
 
     this.time.delayedCall(2000, () => {
       text.destroy();
@@ -1675,7 +1674,17 @@ export default class GameScene extends Phaser.Scene {
       }
     }
 
-    this.fireSound.play();
+    // C++ wizball.txt: fire SFX varies by weapon (normal / blazers / three-way).
+    const fireSoundKey = hasSpread
+      ? 'wizball_or_cat_fire_three_way'
+      : hasDouble
+        ? 'wizball_or_cat_fire_blazers'
+        : 'wizball_or_cat_fire_normal';
+    if (this.cache.audio.exists(fireSoundKey)) {
+      this.sound.play(fireSoundKey, { volume: 0.4 });
+    } else {
+      this.fireSound.play();
+    }
 
     if (this.hasPaint) {
       this.hasPaint = false;

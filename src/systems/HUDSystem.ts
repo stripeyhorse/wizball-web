@@ -97,8 +97,8 @@ export default class HUDSystem {
   }
 
   public update(): void {
-    this.scoreText.setText(this.state.score.toString().padStart(6, '0'));
-    this.hiScoreText.setText(`HI ${this.state.hiScore.toString().padStart(6, '0')}`);
+    this.scoreText.setText(this.state.score.toString().padStart(7, '0'));
+    this.hiScoreText.setText(`HI ${this.state.hiScore.toString().padStart(7, '0')}`);
     this.livesText.setText(`LIVES ${this.state.lives}`);
     this.levelText.setText(`L${this.state.currentLevel}`);
 
