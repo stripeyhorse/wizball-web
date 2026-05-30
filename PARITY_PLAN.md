@@ -417,9 +417,26 @@ verified at runtime against the original):
   the fallback table too.
 - **Spawn yVel=0**, dead-code removal, favicon 404.
 
-### Still open
-- **SLIDING_HORIZONTAL collision response** — corner detection (`whichCorner`) is
-  wired, but the evade algorithm (`WORLDCOLL_push_entity_against_sliding_collision`,
-  world_collision.cpp:2251) is not. Ball can catch on corners. Needs side-by-side
-  validation against the original for feel.
-- See the per-area audit pass for any remaining cosmetic/sequence gaps.
+### Also completed (second pass)
+- **Catellite energy** (9 hits, once-per-frame latch, reset on re-collection).
+- **Extra life per 100,000 points** + life cap 9.
+- **Progression rework** — 3 colour stages per level; every stage → bonus level →
+  laboratory → return to the SAME level; only the 3rd stage advances (or completes
+  the game after level 8). State (score/lives/loadout/progress/cauldrons) threads
+  through the transitions. Lab awards +2000 entry and the (9−level)×1000 decline.
+- **Bonus level** rewritten as the wave-survival shooter (bonus_wave_order, per-kill
+  20+floor(wave/3)×10, killed×40 summary) and wired into the flow.
+- **SLIDING_HORIZONTAL** corner-evade ported and enabled on the player.
+- **Death flow** consolidated: explosion SFX, respawn at start with a ~2s grace +
+  GET READY overlay, Game Over at 0.
+- Audio/scoring cleanup: dead SoundSystem removed, weapon-specific fire SFX,
+  7-digit score, phantom sound dropped.
+
+### Remaining (cosmetic / sequence polish only — gameplay is faithful)
+- Intro/attract logo sequence; full menu suite (the port uses a single TitleScene).
+- Warp-tube spin-out / tube-drop ARRIVAL animations (teleport itself works).
+- Life indicator as a sprite-icon counter (currently `LIVES N` text); enemy-count
+  HUD digits; lives are functionally correct.
+- Death flow's full separate Get-Ready *scene* with pre-life music + full enemy
+  reset (current version respawns in-scene with a grace window).
+- Minor scoring nuances (flythrough +7490; the +1000 wave bonus gating).
