@@ -160,7 +160,10 @@ export default class GameScene extends Phaser.Scene {
   private enemiesKilledThisLevel: number = 0;
   private totalEnemiesInLevel: number = 0;
   private consecutiveEnemyKills: number = 0; // C++: tracks kills for bonus pearl (every 10)
-  private rearFireToggle: boolean = false; // C++: alternates rear fire direction
+  private rearFireToggle: boolean = false; // C++: alternates rear fire direction each shot
+  private spreadFlipSide: boolean = false; // C++ flip_vertical_firing_side: alternates spread fan up/down
+  private shieldOrbs: Phaser.Physics.Arcade.Sprite[] = []; // SHIELD_FIRE orbiting cores
+  private shieldOrbAngle: number = 0;
   private worldWidth: number = GAME_WIDTH;
   private worldHeight: number = GAME_HEIGHT;
   private levelVisuals: Phaser.GameObjects.GameObject[] = [];
@@ -346,8 +349,13 @@ export default class GameScene extends Phaser.Scene {
 
   private hitEnemy(_bullet: any, enemy: any): void {
     const bullet = _bullet as Phaser.Physics.Arcade.Sprite;
-    bullet.destroy();
+    // Shield-fire orbs persist (they orbit the ball); only real bullets are spent.
+    if (!(bullet as any)._isShieldOrb) bullet.destroy();
     const e = enemy as Phaser.Physics.Arcade.Sprite;
+    // Guard against re-killing during the death tween (a persistent orb or a
+    // second bullet can overlap the same enemy across frames before it's gone).
+    if ((e as any)._dying) return;
+    (e as any)._dying = true;
     const enemyData = (e as any)._data;
     const isPaintBubble = enemyData?.enemyType === 0; // EnemyType.PAINT_BUBBLES
     const isBonusMolecule = enemyData?.enemyType === 9; // EnemyType.BONUS_MOLECULE
@@ -1277,7 +1285,10 @@ export default class GameScene extends Phaser.Scene {
 
   private handleBulletWallHit(bullet: any, _wall: any): void {
     if (bullet.active) {
-      if ((bullet as any)._isEnemyBullet) {
+      if ((bullet as any)._isShieldOrb) {
+        // Shield orbs pass through terrain (they orbit the ball).
+        return;
+      } else if ((bullet as any)._isEnemyBullet) {
         this.enemySystem.releaseEnemyBullet(bullet as Phaser.Physics.Arcade.Sprite);
       } else {
         bullet.destroy();
@@ -1610,24 +1621,36 @@ export default class GameScene extends Phaser.Scene {
     const paintTint = this.hasPaint ? PAINT_FRAME_COLORS[this.paintColor] : undefined;
 
     if (hasSpread) {
-      // C++ spread fire: 3 bullets at angles
-      this.spawnBullet(this.player.x + dir * 8, this.player.y, dir * BULLET_SPEED, 0, paintTint);
-      this.spawnBullet(this.player.x + dir * 8, this.player.y, dir * BULLET_SPEED, -BULLET_SPEED * 0.2, paintTint);
-      this.spawnBullet(this.player.x + dir * 8, this.player.y, dir * BULLET_SPEED, BULLET_SPEED * 0.2, paintTint);
-    } else if (hasDouble) {
-      // Double fire: 2 bullets stacked
-      this.spawnBullet(this.player.x + dir * 8, this.player.y - 6, dir * BULLET_SPEED, 0, paintTint);
-      this.spawnBullet(this.player.x + dir * 8, this.player.y + 6, dir * BULLET_SPEED, 0, paintTint);
+      // C++ wizball_spread_fire (wizball.txt:643-662): 3 bullets at ABSOLUTE
+      // angles, alternating each shot between an upper fan (45/90/135°) and a
+      // lower fan (225/270/315°). Screen-y points down, so vy = -sin(angle).
+      const fan = this.spreadFlipSide ? [225, 270, 315] : [45, 90, 135];
+      this.spreadFlipSide = !this.spreadFlipSide;
+      for (const deg of fan) {
+        const rad = (deg * Math.PI) / 180;
+        this.spawnBullet(
+          this.player.x, this.player.y,
+          Math.cos(rad) * BULLET_SPEED, -Math.sin(rad) * BULLET_SPEED,
+          paintTint
+        );
+      }
     } else {
-      // Normal fire: single bullet
-      this.spawnBullet(this.player.x + dir * 8, this.player.y, dir * BULLET_SPEED, 0, paintTint);
-    }
+      // C++ rear fire (wizball.txt:611-619, shared_next_bullet_alternator): the
+      // single shot ALTERNATES direction each press — it does NOT add a rear
+      // bullet. Without rear fire, fire in the facing direction.
+      let fireDir = dir;
+      if (hasRearFire) {
+        // Decide from the current alternator state (first shot = forward), then flip.
+        fireDir = this.rearFireToggle ? -dir : dir;
+        this.rearFireToggle = !this.rearFireToggle;
+      }
 
-    // C++ rear fire: alternates direction each shot
-    if (hasRearFire) {
-      this.rearFireToggle = !this.rearFireToggle;
-      const rearDir = -dir;
-      this.spawnBullet(this.player.x + rearDir * 8, this.player.y, rearDir * BULLET_SPEED, 0, paintTint);
+      if (hasDouble) {
+        this.spawnBullet(this.player.x + fireDir * 8, this.player.y - 6, fireDir * BULLET_SPEED, 0, paintTint);
+        this.spawnBullet(this.player.x + fireDir * 8, this.player.y + 6, fireDir * BULLET_SPEED, 0, paintTint);
+      } else {
+        this.spawnBullet(this.player.x + fireDir * 8, this.player.y, fireDir * BULLET_SPEED, 0, paintTint);
+      }
     }
 
     this.fireSound.play();
@@ -1655,14 +1678,18 @@ export default class GameScene extends Phaser.Scene {
     (bullet as any).isPaintBullet = paintTint !== undefined;
     (bullet as any).paintColor = this.paintColor;
 
+    // Orient the (horizontal) bullet sprite along its travel direction so
+    // angled spread shots don't look like sideways bars. (C++ opengl_angle.)
+    bullet.setRotation(Math.atan2(vy, vx));
+
     // Add to group BEFORE setting velocity (group.add can reset body properties)
     this.bulletGroup.add(bullet);
 
-    // Use BULLET_SPEED constant (720 px/s = C++ value), direction from vx
-    const velX = vx > 0 ? BULLET_SPEED : (vx < 0 ? -BULLET_SPEED : 0);
+    // Use the true velocity vector (do NOT clamp vx to ±speed — that would flatten
+    // diagonal spread bullets). Callers pass vectors already scaled to BULLET_SPEED.
     const body = bullet.body as Phaser.Physics.Arcade.Body;
     body.setAllowGravity(false);
-    bullet.setVelocity(velX, vy);
+    bullet.setVelocity(vx, vy);
   }
 
   private fireCatelliteBullet(): void {
@@ -1744,6 +1771,41 @@ export default class GameScene extends Phaser.Scene {
   // Catellite (the d-pad then steers the Catellite, not the ball).
   private wizballInput(action: 'moveLeft' | 'moveRight' | 'moveUp' | 'moveDown'): boolean {
     return !this.catelliteIsPlayerControlled && this.inputManager.isDown(action);
+  }
+
+  // C++ Shield Fire (wizball.txt:574-600): while FIRE is held, two
+  // wizball_alternate_shield_bullet_core orbs orbit the ball (one above, one
+  // below), acting as a rotating shield/weapon. They persist until FIRE releases.
+  private updateShieldFire(): void {
+    const hasShield = (this.weaponCollection & WeaponFlag.SHIELD_FIRE) !== 0;
+    const fireHeld = this.inputManager.isDown('fire') || this.inputManager.isDown('altFire');
+
+    if (hasShield && fireHeld) {
+      // Drop any orbs destroyed externally (e.g. bulletGroup cleared on reset).
+      this.shieldOrbs = this.shieldOrbs.filter(o => o.active);
+      if (this.shieldOrbs.length === 0) {
+        for (let i = 0; i < 2; i++) {
+          const orb = this.physics.add.sprite(this.player.x, this.player.y, 'bullets', 'bullets_1');
+          orb.setDepth(Depth.WIZBALL_SHIELD);
+          orb.setDisplaySize(14, 14);
+          orb.setTint(0x66ccff);
+          (orb as Phaser.Physics.Arcade.Sprite & { _isShieldOrb: boolean })._isShieldOrb = true;
+          (orb.body as Phaser.Physics.Arcade.Body).setAllowGravity(false);
+          this.bulletGroup.add(orb);  // reuse the bullet->enemy overlap (hitEnemy)
+          this.shieldOrbs.push(orb);
+        }
+      }
+      // Rotate the pair around the ball, diametrically opposite each other.
+      this.shieldOrbAngle += 0.22;
+      const radius = 22;
+      const ox = Math.cos(this.shieldOrbAngle) * radius;
+      const oy = Math.sin(this.shieldOrbAngle) * radius;
+      this.shieldOrbs[0]?.setPosition(this.player.x + ox, this.player.y + oy);
+      this.shieldOrbs[1]?.setPosition(this.player.x - ox, this.player.y - oy);
+    } else if (this.shieldOrbs.length > 0) {
+      this.shieldOrbs.forEach(o => o.destroy());
+      this.shieldOrbs = [];
+    }
   }
 
   private updateMovement(): void {
@@ -2213,6 +2275,7 @@ export default class GameScene extends Phaser.Scene {
 
     this.updateBonusSelectionWobble();
     this.updateCatelliteControlState();
+    this.updateShieldFire();
     this.updateMovement();
     this.checkTileEffects();
     this.updateCatellite();
