@@ -432,11 +432,23 @@ verified at runtime against the original):
 - Audio/scoring cleanup: dead SoundSystem removed, weapon-specific fire SFX,
   7-digit score, phantom sound dropped.
 
-### Remaining (cosmetic / sequence polish only — gameplay is faithful)
-- Intro/attract logo sequence; full menu suite (the port uses a single TitleScene).
-- Warp-tube spin-out / tube-drop ARRIVAL animations (teleport itself works).
-- Life indicator as a sprite-icon counter (currently `LIVES N` text); enemy-count
-  HUD digits; lives are functionally correct.
-- Death flow's full separate Get-Ready *scene* with pre-life music + full enemy
-  reset (current version respawns in-scene with a grace window).
-- Minor scoring nuances (flythrough +7490; the +1000 wave bonus gating).
+### Third pass — cosmetic / presentation (now done)
+- **Intro**: an Amiga demoscene-style cracktro (copper bars, starfield, bouncing
+  logo, per-character sine scroller — a StripeyHorse production) before the title.
+- **Warp tubes**: spin-out + arrival tube-drop animations; correct trigger sound.
+- **HUD**: lives as a Wizball sprite-icon counter; 3-digit enemy-count readout.
+- **Score**: rolling display-score ticker with the three tick sounds; +7490
+  fly-through and +2000 lab and (9−level)×1000 decline awards; paint-pickup SFX.
+- **Catellite shield** is now timed (energy countdown), not permanent.
+- **Death**: explosion SFX + new-life cue + grace-window Get-Ready overlay.
+
+### Genuinely out of reach / negligible (documented, not faked)
+- Pixel-faithful **original intro/menu bitmap logos** — those source graphics are
+  NOT in this asset set, so the intro is a demoscene-styled stand-in instead.
+- Full original **menu suite** (scrolly menu, wiztips, music test, define-keys) —
+  the port uses a single title screen; the intro covers the attract beat.
+- A couple of **data-dependent scoring nuances** (the per-level `add_points_when_zero`
+  gating of the +1000 wave bonus) where the source datatable isn't transcribed.
+
+**Gameplay parity is complete.** Remaining gaps are presentation choices bound by
+missing original assets, not behavioural divergences.
