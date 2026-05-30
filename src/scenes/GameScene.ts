@@ -457,7 +457,13 @@ export default class GameScene extends Phaser.Scene {
     this.idealXVel = 0;
     this.respawnInvulnFrames = 120; // ~2s grace so the new life isn't instantly lost
 
-    // Get-Ready flash + overlay during the grace window.
+    // Pre-life cue + Get-Ready flash/overlay during the grace window. (The 2s
+    // invulnerability is what protects the new life; we deliberately don't dump a
+    // fresh full-level wave on death — spawnEnemies would spawn the whole
+    // allotment at once and skip the molecule phase.)
+    if (this.cache.audio.exists('wizball_new_life_appear_sound')) {
+      this.sound.play('wizball_new_life_appear_sound', { volume: 0.5 });
+    }
     this.tweens.add({ targets: this.player, alpha: 0.3, duration: 120, yoyo: true, repeat: 8, onComplete: () => this.player.setAlpha(1) });
     const msg = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 - 30, 'GET READY', {
       fontSize: '28px', color: '#ffff66', fontFamily: 'monospace',
