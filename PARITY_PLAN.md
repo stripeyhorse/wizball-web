@@ -394,8 +394,32 @@ Week 4: Polish, bonus levels, audio ✅
 
 ---
 
-## Status: 100% Parity Achieved
+## Status (updated 2026-05-30): NOT 100% — see below
 
-All core mechanics, levels, scenes, and game systems match the C++ original.
-Only missing: Music files (not available in assets)
-- `src/scenes/PreloadScene.ts` — all tilesets, backgrounds
+The earlier "100% Parity Achieved" claim was inaccurate. A fresh audit against
+the C++ source (`wizball-remake/wizball/wizball/`) found several core mechanics
+broken or missing. The following were fixed on branch `cpp-parity-fixes` (each
+verified at runtime against the original):
+
+- **Paint → cauldron → completion loop** — paint pickups now fill cauldrons; level
+  completion uses the real 3-stage `level_completion_colours` target table (was
+  non-functional: cauldrons never filled, "all pots to 20" rule).
+- **Catellite hold-FIRE control** — the signature mechanic was inverted (driven by
+  Wizball motion, never read FIRE). Now FIRE held ≥25 frames pilots the cat and
+  freezes the ball.
+- **Tile layering + collision** — FG/SFG layers occlude entities (C++ draw orders);
+  Catellite had no depth (drew at 0); arcade colliders gated on the player bitmask.
+- **Bonus Molecule** — was a firing bouncer; now a stationary pearl-dropper.
+- **Weapons** — rear fire (alternating single shot), spread fire (correct absolute-
+  angle fans), shield fire (orbiting orbs); fixed diagonal-bullet velocity clamp.
+- **Fuzz enemy** — never spawned; added the kill-triggered fuzz counter (2700).
+- **Enemy queues** — verified the live selection matches `enemy_queues.txt`; aligned
+  the fallback table too.
+- **Spawn yVel=0**, dead-code removal, favicon 404.
+
+### Still open
+- **SLIDING_HORIZONTAL collision response** — corner detection (`whichCorner`) is
+  wired, but the evade algorithm (`WORLDCOLL_push_entity_against_sliding_collision`,
+  world_collision.cpp:2251) is not. Ball can catch on corners. Needs side-by-side
+  validation against the original for feel.
+- See the per-area audit pass for any remaining cosmetic/sequence gaps.
