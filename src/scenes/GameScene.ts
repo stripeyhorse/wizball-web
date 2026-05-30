@@ -30,7 +30,8 @@ import WorldCollisionMap, {
   COLLISION_HORIZONTAL_WORLD_EDGE_SOLID,
   COLLISION_ITERATE_MOVEMENT,
   COLLISION_USE_EXTRA_TEST_POINTS,
-  COLLISION_VERTICAL_WORLD_EDGE_SOLID
+  COLLISION_VERTICAL_WORLD_EDGE_SOLID,
+  COLL_TYPE_SLIDING_HORIZONTAL
 } from '../systems/WorldCollision';
 import BonusSelectionPanelSystem from '../systems/BonusSelectionPanelSystem';
 import CauldronSystem from '../systems/CauldronSystem';
@@ -66,7 +67,8 @@ const PLAYER_WORLD_COLLISION_BEHAVIOUR =
   COLLISION_USE_EXTRA_TEST_POINTS |
   COLLISION_ITERATE_MOVEMENT |
   COLLISION_HORIZONTAL_WORLD_EDGE_SOLID |
-  COLLISION_VERTICAL_WORLD_EDGE_SOLID;
+  COLLISION_VERTICAL_WORLD_EDGE_SOLID |
+  COLL_TYPE_SLIDING_HORIZONTAL; // C++ wizball.txt:160 — slide along corners, don't dead-stop
 
 const BITSHIFT = 8;
 const PRIVATE_SCALE = 1 << BITSHIFT; // 256
@@ -162,6 +164,7 @@ export default class GameScene extends Phaser.Scene {
   // C++ level_progress (main_game_controller.txt): 0..2, which of the 3 colour
   // targets the player is currently mixing toward. Reaches 3 => level complete.
   private levelProgress: number = 0;
+  private stageTransitioning: boolean = false; // guards the stage→bonus→lab handoff
   private enemiesKilledThisLevel: number = 0;
   private totalEnemiesInLevel: number = 0;
   private consecutiveEnemyKills: number = 0; // C++: tracks kills for bonus pearl (every 10)
@@ -201,14 +204,20 @@ export default class GameScene extends Phaser.Scene {
     super({ key: GAME });
   }
 
-  init(data: { level?: number; score?: number; weaponCollection?: number; lives?: number } = {}): void {
+  init(data: {
+    level?: number; score?: number; weaponCollection?: number; lives?: number;
+    levelProgress?: number; cauldronFill?: number[];
+  } = {}): void {
     this.currentLevel = data.level ?? 1;
     this.score = data.score ?? 0;
     this.weaponCollection = data.weaponCollection ?? 0;
     this.lives = data.lives ?? this.lives;
     this.lastScoreSector = Math.floor(this.score / 100000); // don't re-award on continue
-    this.levelProgress = 0;
-    this.cauldronFill = [0, 0, 0, 0];
+    // levelProgress + cauldronFill resume across bonus→lab→same-level (C++ colour
+    // stages); a fresh level starts both at zero.
+    this.levelProgress = data.levelProgress ?? 0;
+    this.cauldronFill = data.cauldronFill ? [...data.cauldronFill] : [0, 0, 0, 0];
+    this.stageTransitioning = false;
     this.applyWeaponMovementStyle();
   }
 
@@ -566,9 +575,10 @@ export default class GameScene extends Phaser.Scene {
       this.sound.play('cauldron_full_burst', { volume: 0.6 });
     }
 
-    if (this.isLevelComplete()) {
-      this.startLevelTransition();
-    }
+    // C++ main_game_controller.txt:1043-1052 — EVERY colour-stage match fires
+    // GET_READY_FOR_BONUS → bonus level → laboratory. The lab then decides whether
+    // to return to this level (stages 1-2) or advance (after the 3rd stage).
+    this.startStageTransition();
   }
 
   private handlePostEnemyRemoval(): void {
@@ -588,9 +598,13 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
-  private startLevelTransition(): void {
-    // Show level complete
-    const text = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2, 'LEVEL COMPLETE!', {
+  private startStageTransition(): void {
+    if (this.stageTransitioning) return;
+    this.stageTransitioning = true;
+
+    const complete = this.isLevelComplete();
+    const text = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2,
+      complete ? 'LEVEL COMPLETE!' : 'COLOUR MATCHED!', {
       fontSize: '32px',
       color: '#ffffff',
       fontFamily: 'monospace',
@@ -600,42 +614,18 @@ export default class GameScene extends Phaser.Scene {
     text.setScrollFactor(0);
     text.setDepth(200);
 
-    // (No 'level_complete' SFX exists in the original or the assets — the
-    // section-clear cue is spawn_new_wave_sound, played in handlePostEnemyRemoval.)
-
-    this.time.delayedCall(2000, () => {
+    // C++: a matched colour heads to the bonus level (then the laboratory). State
+    // is threaded through so the lab can resume this level or advance it.
+    this.time.delayedCall(1500, () => {
       text.destroy();
-      const MAX_LEVEL = 8;
-
-      // C++ flow: fill cauldrons -> bonus level -> Laboratory -> next level
-      // After completing cauldrons, go to Laboratory for upgrade selection
-      // Then advance to next level
-      // After all 8 levels, game complete
-      if (this.currentLevel >= MAX_LEVEL) {
-        this.scene.start('GameComplete', {
-          score: this.score,
-          level: this.currentLevel
-        });
-        return;
-      }
-
-      // Go to Laboratory after completing each level's cauldrons
-      this.goToLaboratory();
-    });
-  }
-
-  private nextLevel(): void {
-    this.currentLevel++;
-    this.enemiesKilledThisLevel = 0;
-    this.resetLevel();
-  }
-
-  private goToLaboratory(): void {
-    // Show "HEADING TO LABORATORY!" message, then transition to Laboratory
-    this.scene.start('Laboratory', {
-      level: this.currentLevel,
-      score: this.score,
-      weaponCollection: this.weaponCollection
+      this.scene.start('BonusLevel', {
+        level: this.currentLevel,
+        score: this.score,
+        weaponCollection: this.weaponCollection,
+        lives: this.lives,
+        levelProgress: this.levelProgress,
+        cauldronFill: this.cauldronFill
+      });
     });
   }
 

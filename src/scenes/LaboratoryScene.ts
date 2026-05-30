@@ -13,6 +13,9 @@ export default class LaboratoryScene extends Phaser.Scene {
   private level: number = 1;
   private score: number = 0;
   private weaponCollection: number = 0;
+  private lives: number = 2;
+  private levelProgress: number = 3; // 3 => the level's last stage just finished
+  private cauldronFill: number[] = [0, 0, 0, 0];
   private options: UpgradeOption[] = [];
   private selectedIndex: number = 0;
   private icons: Phaser.GameObjects.Image[] = [];
@@ -26,10 +29,18 @@ export default class LaboratoryScene extends Phaser.Scene {
     super({ key: 'Laboratory' });
   }
 
-  init(data: { level: number; score?: number; weaponCollection?: number }): void {
+  init(data: {
+    level: number; score?: number; weaponCollection?: number; lives?: number;
+    levelProgress?: number; cauldronFill?: number[];
+  }): void {
     this.level = data.level || 1;
     this.score = data.score || 0;
     this.weaponCollection = data.weaponCollection || 0;
+    this.lives = data.lives ?? 2;
+    this.levelProgress = data.levelProgress ?? 3;
+    this.cauldronFill = data.cauldronFill ? [...data.cauldronFill] : [0, 0, 0, 0];
+    // C++ main_game_controller.txt:508-510 — entering the lab awards +2000.
+    this.score += 2000;
   }
 
   create(): void {
@@ -42,7 +53,8 @@ export default class LaboratoryScene extends Phaser.Scene {
       fontFamily: 'monospace'
     }).setOrigin(0.5);
 
-    this.add.text(320, 70, `LEVEL ${this.level} COMPLETE`, {
+    this.add.text(320, 70,
+      this.levelProgress >= 3 ? `LEVEL ${this.level} COMPLETE` : `LEVEL ${this.level} — COLOUR ${this.levelProgress} / 3`, {
       fontSize: '24px',
       color: '#88ff88',
       fontFamily: 'monospace'
@@ -162,6 +174,10 @@ export default class LaboratoryScene extends Phaser.Scene {
       } else if (selected.flag === WeaponFlag.CAT_SPREAD_FIRE) {
         this.weaponCollection &= ~WeaponFlag.WIZ_SPREAD_FIRE;
       }
+    } else {
+      // C++ lab_manage_permanent_upgrade_icons.txt:158-167 — declining the bonus
+      // awards level-scaled points instead.
+      this.score += Math.max(0, (9 - this.level)) * 1000;
     }
 
     if (this.cache.audio.exists('permanent_upgrade_selected')) {
@@ -173,11 +189,23 @@ export default class LaboratoryScene extends Phaser.Scene {
   }
 
   private nextLevel(): void {
-    this.scene.start(GAME, {
-      level: this.level + 1,
+    const shared = {
       score: this.score,
-      weaponCollection: this.weaponCollection
-    });
+      weaponCollection: this.weaponCollection,
+      lives: this.lives
+    };
+
+    if (this.levelProgress >= 3) {
+      // Level fully done (all 3 colour stages). Advance, or finish the game.
+      if (this.level >= 8) {
+        this.scene.start('GameComplete', { score: this.score, level: this.level });
+        return;
+      }
+      this.scene.start(GAME, { ...shared, level: this.level + 1, levelProgress: 0, cauldronFill: [0, 0, 0, 0] });
+    } else {
+      // More colour stages remain — return to the SAME level, resuming progress.
+      this.scene.start(GAME, { ...shared, level: this.level, levelProgress: this.levelProgress, cauldronFill: this.cauldronFill });
+    }
   }
 
   update(): void {
