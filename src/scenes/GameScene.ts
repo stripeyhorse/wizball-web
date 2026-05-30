@@ -152,6 +152,7 @@ export default class GameScene extends Phaser.Scene {
   // Game state
   private lives: number = 2;
   private lastScoreSector: number = 0; // C++ awards a life each 100k crossed
+  private respawnInvulnFrames: number = 0; // post-death grace window (new-life appear)
   private paintColor: number = 0;
   private hasPaint: boolean = false;
   private fireCooldown: number = 0;
@@ -218,6 +219,7 @@ export default class GameScene extends Phaser.Scene {
     this.levelProgress = data.levelProgress ?? 0;
     this.cauldronFill = data.cauldronFill ? [...data.cauldronFill] : [0, 0, 0, 0];
     this.stageTransitioning = false;
+    this.respawnInvulnFrames = 0;
     this.applyWeaponMovementStyle();
   }
 
@@ -421,27 +423,49 @@ export default class GameScene extends Phaser.Scene {
     });
   }
 
+  private playerIsInvulnerable(): boolean {
+    return (this.weaponCollection & WeaponFlag.INVULNERABILITY) !== 0 || this.respawnInvulnFrames > 0;
+  }
+
+  // Single death/respawn path (C++ reset_due_to_life_loss): explode, lose a life,
+  // game over at 0, else respawn at the start with a brief Get-Ready grace window.
+  private loseLife(): void {
+    if (this.playerIsInvulnerable() || this.stageTransitioning) return;
+
+    if (this.cache.audio.exists('wizball_explode')) {
+      this.sound.play('wizball_explode', { volume: 0.6 });
+    }
+    this.lives--;
+    if (this.lives <= 0) {
+      this.scene.start('GameOver', { score: this.score, level: this.currentLevel, weaponCollection: this.weaponCollection, lives: this.lives });
+      return;
+    }
+
+    const spawn = this.getSpawnPosition();
+    this.player.setPosition(spawn.x, spawn.y);
+    this.playerXFixed = spawn.x * PRIVATE_SCALE;
+    this.playerYFixed = spawn.y * PRIVATE_SCALE;
+    (this.player.body as Phaser.Physics.Arcade.Body).updateFromGameObject();
+    this.xVel = 0;
+    this.yVel = 0;
+    this.idealXVel = 0;
+    this.respawnInvulnFrames = 120; // ~2s grace so the new life isn't instantly lost
+
+    // Get-Ready flash + overlay during the grace window.
+    this.tweens.add({ targets: this.player, alpha: 0.3, duration: 120, yoyo: true, repeat: 8, onComplete: () => this.player.setAlpha(1) });
+    const msg = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 - 30, 'GET READY', {
+      fontSize: '28px', color: '#ffff66', fontFamily: 'monospace',
+      backgroundColor: '#00000088', padding: { x: 12, y: 6 }
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(200);
+    this.time.delayedCall(1200, () => msg.destroy());
+  }
+
   // C++: player touching an enemy destroys the enemy and damages the player
   private playerCollideWithEnemy(_player: any, _enemy: any): void {
-    const player = _player as Phaser.Physics.Arcade.Sprite;
     const enemy = _enemy as Phaser.Physics.Arcade.Sprite;
 
-    // Player takes damage (unless invulnerable)
-    if ((this.weaponCollection & WeaponFlag.INVULNERABILITY) === 0) {
-      this.lives--;
-      if (this.lives <= 0) {
-        this.scene.start('GameOver', { score: this.score, level: this.currentLevel, weaponCollection: this.weaponCollection, lives: this.lives });
-        return;
-      }
-      // Flash player
-      this.tweens.add({
-        targets: player,
-        alpha: 0.3,
-        duration: 100,
-        yoyo: true,
-        repeat: 3,
-      });
-    }
+    // Player takes damage (unless invulnerable / in respawn grace).
+    this.loseLife();
 
     // Destroy enemy on contact
     this.tweens.add({
@@ -519,26 +543,7 @@ export default class GameScene extends Phaser.Scene {
   private hitByEnemyBullet(_player: any, bullet: any): void {
     const b = bullet as Phaser.Physics.Arcade.Sprite;
     this.enemySystem.releaseEnemyBullet(b);
-
-    // Check invulnerability
-    if ((this.weaponCollection & WeaponFlag.INVULNERABILITY) !== 0) {
-      return;
-    }
-
-    this.lives--;
-    if (this.lives <= 0) {
-      this.scene.start('GameOver', { score: this.score, level: this.currentLevel, weaponCollection: this.weaponCollection, lives: this.lives });
-    } else {
-      // Flash player to indicate damage
-      this.tweens.add({
-        targets: this.player,
-        alpha: 0.3,
-        duration: 100,
-        yoyo: true,
-        repeat: 3,
-        onComplete: () => { this.player.setAlpha(1); }
-      });
-    }
+    this.loseLife();
   }
 
   /** Level is finished once all three colour-match stages are cleared. */
@@ -2227,20 +2232,8 @@ export default class GameScene extends Phaser.Scene {
 
     // Deadly tiles kill the player
     if ((props & BOOL_DEADLY) !== 0 || (props & BOOL_HARMFUL) !== 0) {
-      if ((this.weaponCollection & WeaponFlag.INVULNERABILITY) === 0) {
-        this.lives--;
-        if (this.lives <= 0) {
-          this.scene.start('GameOver', { score: this.score, level: this.currentLevel, weaponCollection: this.weaponCollection, lives: this.lives });
-        } else {
-          // Respawn at start
-          const spawn = this.getSpawnPosition();
-          this.player.setPosition(spawn.x, spawn.y);
-          this.playerXFixed = spawn.x * PRIVATE_SCALE;
-          this.playerYFixed = spawn.y * PRIVATE_SCALE;
-          this.xVel = 0;
-          this.yVel = 0; // C++ spawns with y_vel = 0; gravity ramps it (wizball.txt)
-          this.idealXVel = 0;
-        }
+      {
+        this.loseLife();
         return;
       }
     }
@@ -2332,6 +2325,7 @@ export default class GameScene extends Phaser.Scene {
     this.enemySystem.update();
     this.updateFuzzCounter();
     this.checkExtraLife();
+    if (this.respawnInvulnFrames > 0) this.respawnInvulnFrames--;
     this.warpTubeSystem.update();
     this.warpTubeSystem.checkWarp(this.player);
     this.updateHUD();
