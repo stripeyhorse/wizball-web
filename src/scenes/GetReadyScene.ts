@@ -52,6 +52,7 @@ export default class GetReadyScene extends Phaser.Scene {
 
     const spaceKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
     spaceKey.on('down', this.startGame, this);
+    this.input.on('pointerdown', this.startGame, this); // tap to skip (mobile)
 
     if (this.cache.audio.exists('menu_select')) {
       this.sound.add('menu_select', { volume: 0.5 });

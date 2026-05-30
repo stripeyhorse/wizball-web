@@ -11,6 +11,8 @@ export default class TitleScene extends Phaser.Scene {
   private blinkTimer = 0;
   private attractTimer = 0;
   private showingScores = false;
+  private started = false;
+  private firePrev = false;
   private hiScoreSystem!: HiScoreSystem;
 
   constructor() {
@@ -22,6 +24,8 @@ export default class TitleScene extends Phaser.Scene {
     this.blinkTimer = 0;
     this.attractTimer = 0;
     this.showingScores = false;
+    this.started = false;
+    this.firePrev = false;
 
     // Black backdrop (pillarbox bars), then the original Amiga title art
     // (Ocean / Sensible Software, 1987), scaled to fit preserving aspect.
@@ -42,7 +46,7 @@ export default class TitleScene extends Phaser.Scene {
     this.buildHiScorePanel();
     this.hiScorePanel.setVisible(false);
 
-    this.startText = this.add.text(320, 388, 'PRESS SPACE TO START', {
+    this.startText = this.add.text(320, 388, 'PRESS SPACE / TAP TO START', {
       fontSize: '18px', color: '#ffffff', fontFamily: 'monospace', fontStyle: 'bold',
       backgroundColor: '#000000cc', padding: { x: 12, y: 6 },
     }).setOrigin(0.5).setDepth(10);
@@ -57,6 +61,9 @@ export default class TitleScene extends Phaser.Scene {
     spaceKey.on('down', this.startGame, this);
     const settingsKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.S);
     settingsKey.on('down', this.openSettings, this);
+
+    // Touch / mouse: tap anywhere (off the on-screen buttons) to start.
+    this.input.on('pointerdown', this.startGame, this);
 
     if (this.cache.audio.exists('menu_select')) {
       this.sound.add('menu_select');
@@ -93,6 +100,8 @@ export default class TitleScene extends Phaser.Scene {
   }
 
   private startGame(): void {
+    if (this.started) return;
+    this.started = true;
     if (this.cache.audio.exists('menu_select')) {
       this.sound.add('menu_select', { volume: 0.6 }).play();
     }
@@ -105,6 +114,11 @@ export default class TitleScene extends Phaser.Scene {
   }
 
   update(): void {
+    // On-screen FIRE button (mobile) also starts the game.
+    const fire = !!(window as unknown as { __wizTouch?: Record<string, boolean> }).__wizTouch?.fire;
+    if (fire && !this.firePrev) this.startGame();
+    this.firePrev = fire;
+
     // Blink the start prompt.
     if (++this.blinkTimer > 30) {
       this.blinkTimer = 0;

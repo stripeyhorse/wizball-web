@@ -511,15 +511,16 @@ export default class BonusLevelScene extends Phaser.Scene {
   private handlePlayer(): void {
     if (!this.player) return;
 
+    const t = (window as unknown as { __wizTouch?: Record<string, boolean> }).__wizTouch || {};
     let vx = 0;
     let vy = 0;
-    if (this.cursors.left?.isDown) vx -= PLAYER_SPEED;
-    if (this.cursors.right?.isDown) vx += PLAYER_SPEED;
-    if (this.cursors.up?.isDown) vy -= PLAYER_SPEED;
-    if (this.cursors.down?.isDown) vy += PLAYER_SPEED;
+    if (this.cursors.left?.isDown || t.moveLeft) vx -= PLAYER_SPEED;
+    if (this.cursors.right?.isDown || t.moveRight) vx += PLAYER_SPEED;
+    if (this.cursors.up?.isDown || t.moveUp) vy -= PLAYER_SPEED;
+    if (this.cursors.down?.isDown || t.moveDown) vy += PLAYER_SPEED;
     this.player.setVelocity(vx, vy);
 
-    if (this.fireKey.isDown) {
+    if (this.fireKey.isDown || t.fire) {
       this.fire();
     }
   }

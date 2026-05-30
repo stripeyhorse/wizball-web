@@ -8,6 +8,7 @@ export class InputManager {
   private keys: Map<ActionName, Phaser.Input.Keyboard.Key> = new Map();
   private pad: Phaser.Input.Gamepad.Gamepad | null = null;
   private prevButtonState: Map<number, boolean> = new Map();
+  private prevTouch: Partial<Record<ActionName, boolean>> = {};
 
   constructor(scene: Phaser.Scene) {
     this.scene = scene;
@@ -34,7 +35,16 @@ export class InputManager {
     scene.events.once('shutdown', () => this.destroy());
   }
 
+  // On-screen touch controls (mobile) write window.__wizTouch[action] = true/false.
+  private touchDown(action: ActionName): boolean {
+    const t = (typeof window !== 'undefined') ? (window as unknown as { __wizTouch?: Record<string, boolean> }).__wizTouch : undefined;
+    return !!(t && t[action]);
+  }
+
   isDown(action: ActionName): boolean {
+    // Touch overlay
+    if (this.touchDown(action)) return true;
+
     // Keyboard
     const key = this.keys.get(action);
     if (key?.isDown) return true;
@@ -58,6 +68,9 @@ export class InputManager {
   }
 
   justDown(action: ActionName): boolean {
+    // Touch overlay (edge-detected against the previous frame)
+    if (this.touchDown(action) && !this.prevTouch[action]) return true;
+
     // Keyboard
     const key = this.keys.get(action);
     if (key && Phaser.Input.Keyboard.JustDown(key)) return true;
@@ -111,6 +124,9 @@ export class InputManager {
         this.prevButtonState.set(i, this.pad.buttons[i]?.pressed ?? false);
       }
     }
+    // Store previous touch states for touch justDown edge detection.
+    const actions: ActionName[] = ['moveLeft', 'moveRight', 'moveUp', 'moveDown', 'fire', 'altFire', 'pause'];
+    for (const a of actions) this.prevTouch[a] = this.touchDown(a);
   }
 
   destroy(): void {

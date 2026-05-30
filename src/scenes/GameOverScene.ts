@@ -17,6 +17,7 @@ export default class GameOverScene extends Phaser.Scene {
   private nameText!: Phaser.GameObjects.Text;
   private enteringName: boolean = false;
   private currentMusic: SceneMusic | null = null;
+  private firePrev = false;
 
   constructor() {
     super({ key: 'GameOver' });
@@ -71,6 +72,9 @@ export default class GameOverScene extends Phaser.Scene {
         this.handleNameInput(event);
       }
     });
+
+    // Touch / mouse (mobile): tap to confirm — auto-fills the name if needed.
+    this.input.on('pointerdown', this.touchConfirm, this);
 
     if (this.cache.audio.exists('wizball_explode')) {
       this.sound.add('wizball_explode', { volume: 0.7 }).play();
@@ -178,7 +182,24 @@ export default class GameOverScene extends Phaser.Scene {
     this.scene.start(GAME, { level: 1 });
   }
 
+  // Touch confirm: submit the score (auto-filling the name) or restart.
+  private touchConfirm(): void {
+    if (this.enteringName) {
+      if (this.nameInput.length < 3) {
+        this.nameInput = (this.nameInput + 'YOU').slice(0, 3);
+      }
+      this.submitScore();
+    } else {
+      this.restartGame();
+    }
+  }
+
   update(): void {
+    // On-screen FIRE (mobile) confirms too.
+    const fire = !!(window as unknown as { __wizTouch?: Record<string, boolean> }).__wizTouch?.fire;
+    if (fire && !this.firePrev) this.touchConfirm();
+    this.firePrev = fire;
+
     this.blinkTimer++;
     if (this.blinkTimer > 30) {
       this.blinkTimer = 0;

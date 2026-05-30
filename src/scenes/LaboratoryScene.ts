@@ -24,6 +24,9 @@ export default class LaboratoryScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private fireKey!: Phaser.Input.Keyboard.Key;
   private complete: boolean = false;
+  private tLeft = false;
+  private tRight = false;
+  private tFire = false;
 
   constructor() {
     super({ key: 'Laboratory' });
@@ -222,5 +225,12 @@ export default class LaboratoryScene extends Phaser.Scene {
     if (Phaser.Input.Keyboard.JustDown(this.fireKey)) {
       this.confirmSelection();
     }
+
+    // On-screen touch controls (mobile): d-pad changes the choice, FIRE accepts.
+    const t = (window as unknown as { __wizTouch?: Record<string, boolean> }).__wizTouch || {};
+    if (t.moveLeft && !this.tLeft) this.moveSelection(-1);
+    if (t.moveRight && !this.tRight) this.moveSelection(1);
+    if (t.fire && !this.tFire) this.confirmSelection();
+    this.tLeft = !!t.moveLeft; this.tRight = !!t.moveRight; this.tFire = !!t.fire;
   }
 }
