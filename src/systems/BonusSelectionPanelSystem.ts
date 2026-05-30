@@ -1,10 +1,11 @@
 import Phaser from 'phaser';
 import { WeaponFlag } from '../types/game';
 
-// Rendered inside the bottom status panel (y=368–415), between the score/lives
-// block and the cauldrons. Each icon is 24×24 with 2px gap.
-const PANEL_X = 256;
-const PANEL_Y = 372;
+// Rendered in the TOP status bar, centred between the two scores — matching the
+// original Amiga layout (weapon-icon panel across the top). 7 icons × 26px = 182,
+// centred in 640 → start x = 229. Each icon is 24×24.
+const PANEL_X = 229;
+const PANEL_Y = 6;
 const PANEL_SPACING = 26;
 const ICON_SIZE = 24;
 
