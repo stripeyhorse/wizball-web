@@ -88,6 +88,7 @@ const CATELLITE_CONTROLLED_VERTICAL_SPEED = 6;
 const CATELLITE_FOLLOWING_HORIZONTAL_SPEED = 4;
 const CATELLITE_CONTROL_THRESHOLD = 25;
 const FUZZ_COUNTER_START = 2700; // C++ FUZZ_COUNTER_START_VALUE — frames of no kills before a Fuzz spawns
+const CATELLITE_STARTING_ENERGY = 9; // C++ CATELLITE_STARTING_ENERGY — hits the cat takes before destruction
 
 // Paint colors
 const PAINT_COLORS = ['RED', 'GREEN', 'BLUE'];
@@ -128,6 +129,8 @@ export default class GameScene extends Phaser.Scene {
   private catellitePreviousYPositions: number[] = [];
   private catelliteIsPlayerControlled: boolean = false;
   private mutantCatelliteActive: boolean = false;
+  private catelliteEnergy: number = CATELLITE_STARTING_ENERGY; // C++ catellite_energy (9 hits)
+  private catelliteHitThisFrame: boolean = false;              // once-per-frame energy-loss latch
   private catelliteFireCooldown: number = 0;
 
   // Game objects
@@ -450,43 +453,54 @@ export default class GameScene extends Phaser.Scene {
 
   // C++: catellite touching an enemy destroys the catellite (unless INDESTRUCTACAT)
   private catelliteCollideWithEnemy(_catellite: any, _enemy: any): void {
+    // No catellite owned (or already destroyed this life) → no contact.
+    if ((this.weaponCollection & WeaponFlag.CATELLITE) === 0 || !this.catellite.visible) return;
     const enemy = _enemy as Phaser.Physics.Arcade.Sprite;
 
-    // INDESTRUCTACAT: catellite cannot be destroyed
-    if ((this.weaponCollection & WeaponFlag.INDESTRUCTACAT) !== 0) {
-      return;
+    const invulnerable =
+      (this.weaponCollection & WeaponFlag.INDESTRUCTACAT) !== 0 ||
+      (this.weaponCollection & WeaponFlag.CATELLITE_INVULNERABILITY) !== 0;
+
+    // C++ catellite.txt: the cat has catellite_energy (9). Each contact costs 1,
+    // but only once per frame (hit_this_frame latch). At 0 it self-destructs and
+    // CATELLITE is stripped from the loadout. The enemy dies on contact either way.
+    if (!invulnerable && !this.catelliteHitThisFrame) {
+      this.catelliteHitThisFrame = true;
+      this.catelliteEnergy--;
+      if (this.cache.audio.exists('catellite_hit')) {
+        this.sound.play('catellite_hit', { volume: 0.5 });
+      }
+      if (this.catelliteEnergy <= 0) {
+        this.destroyCatellite();
+      } else {
+        // Hit feedback flash (warns more strongly when nearly dead).
+        this.tweens.add({ targets: this.catellite, alpha: 0.3, duration: 60, yoyo: true });
+        if (this.catelliteEnergy <= 1) this.catellite.setTint(0xff8866);
+      }
     }
 
-    // CATELLITE_INVULNERABILITY: temporarily invincible
-    if ((this.weaponCollection & WeaponFlag.CATELLITE_INVULNERABILITY) !== 0) {
-      return;
-    }
+    // Enemy dies on contact — reuse the bullet path with a persistent fake "bullet"
+    // (the _isShieldOrb flag keeps hitEnemy from destroying it) so kills score,
+    // drop pearls/paint, and reset the fuzz counter consistently.
+    this.hitEnemy({ _isShieldOrb: true, active: true, destroy() {} }, enemy);
+  }
 
-    // Destroy catellite
+  private destroyCatellite(): void {
+    this.weaponCollection &= ~WeaponFlag.CATELLITE;
+    this.catelliteIsPlayerControlled = false;
+    if (this.cache.audio.exists('catellite_zoom_off_screen')) {
+      this.sound.play('catellite_zoom_off_screen', { volume: 0.6 });
+    }
     this.tweens.add({
       targets: this.catellite,
       scale: 0,
       alpha: 0,
       duration: 200,
       onComplete: () => {
-        // Remove catellite from weapon collection
-        this.weaponCollection &= ~WeaponFlag.CATELLITE;
-        // Kill the enemy too
-        this.tweens.add({
-          targets: enemy,
-          scale: 1.5,
-          alpha: 0,
-          duration: 150,
-          onComplete: () => {
-            this.score += 50;
-            this.enemiesKilledThisLevel++;
-            if (this.cache.audio.exists('enemy_explode')) {
-              this.sound.play('enemy_explode', { volume: 0.5 });
-            }
-            enemy.destroy();
-            this.handlePostEnemyRemoval();
-          }
-        });
+        this.catellite.setVisible(false);
+        this.catellite.setScale(1);
+        this.catellite.setAlpha(1);
+        this.catellite.clearTint();
       }
     });
   }
@@ -1425,6 +1439,8 @@ export default class GameScene extends Phaser.Scene {
         if ((this.weaponCollection & WeaponFlag.CATELLITE) === 0) {
           this.weaponCollection |= WeaponFlag.CATELLITE;
           this.catellite.setVisible(true);
+          this.catellite.setScale(1).setAlpha(1).clearTint();
+          this.catelliteEnergy = CATELLITE_STARTING_ENERGY; // C++ resets energy on (re)collection
           applied = true;
         }
         break;
@@ -1760,6 +1776,7 @@ export default class GameScene extends Phaser.Scene {
   // to the player and disables Wizball movement (allow_movement = false). Mutant
   // Cat ignores player control (it auto-hunts), and control needs an owned cat.
   private updateCatelliteControlState(): void {
+    this.catelliteHitThisFrame = false; // fresh each frame for the energy-loss latch
     const hasCatellite = (this.weaponCollection & WeaponFlag.CATELLITE) !== 0 && this.catellite.visible;
     const fireHeld = this.inputManager.isDown('fire') || this.inputManager.isDown('altFire');
 
