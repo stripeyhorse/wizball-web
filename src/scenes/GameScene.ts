@@ -91,6 +91,7 @@ const CATELLITE_FOLLOWING_HORIZONTAL_SPEED = 4;
 const CATELLITE_CONTROL_THRESHOLD = 25;
 const FUZZ_COUNTER_START = 2700; // C++ FUZZ_COUNTER_START_VALUE — frames of no kills before a Fuzz spawns
 const CATELLITE_STARTING_ENERGY = 9; // C++ CATELLITE_STARTING_ENERGY — hits the cat takes before destruction
+const CATELLITE_SHIELD_ENERGY = 2100; // C++ SHIELD_STARTING_ENERGY — frames the cat shield lasts
 
 // Paint colors
 const PAINT_COLORS = ['RED', 'GREEN', 'BLUE'];
@@ -160,6 +161,7 @@ export default class GameScene extends Phaser.Scene {
   private fireCooldown: number = 0;
   private catelliteOrbitAngle: number = 0;
   private catelliteHasShield: boolean = false;
+  private catShieldEnergy: number = 0; // C++ cat_shield_stored_health countdown
   private score: number = 0;
   private currentLevel: number = 1;
   private currentPickupCount: number = 0;
@@ -223,6 +225,7 @@ export default class GameScene extends Phaser.Scene {
     this.cauldronFill = data.cauldronFill ? [...data.cauldronFill] : [0, 0, 0, 0];
     this.stageTransitioning = false;
     this.respawnInvulnFrames = 0;
+    this.catShieldEnergy = 0;
     this.applyWeaponMovementStyle();
   }
 
@@ -1468,6 +1471,7 @@ export default class GameScene extends Phaser.Scene {
         if ((this.weaponCollection & WeaponFlag.CATELLITE) !== 0) {
           this.weaponCollection |= WeaponFlag.CATELLITE_INVULNERABILITY;
           this.catelliteHasShield = true;
+          this.catShieldEnergy = CATELLITE_SHIELD_ENERGY; // C++: shield is timed, not permanent
         }
         applied = true;
         break;
@@ -2351,6 +2355,11 @@ export default class GameScene extends Phaser.Scene {
     this.updateDisplayScore();
     this.checkExtraLife();
     if (this.respawnInvulnFrames > 0) this.respawnInvulnFrames--;
+    // C++: the catellite shield is timed — when it runs out, drop the flag.
+    if (this.catShieldEnergy > 0 && --this.catShieldEnergy <= 0) {
+      this.weaponCollection &= ~WeaponFlag.CATELLITE_INVULNERABILITY;
+      this.catelliteHasShield = false;
+    }
     this.warpTubeSystem.update();
     this.warpTubeSystem.checkWarp(this.player);
     this.updateHUD();
