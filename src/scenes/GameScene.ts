@@ -149,6 +149,7 @@ export default class GameScene extends Phaser.Scene {
 
   // Game state
   private lives: number = 2;
+  private lastScoreSector: number = 0; // C++ awards a life each 100k crossed
   private paintColor: number = 0;
   private hasPaint: boolean = false;
   private fireCooldown: number = 0;
@@ -205,6 +206,7 @@ export default class GameScene extends Phaser.Scene {
     this.score = data.score ?? 0;
     this.weaponCollection = data.weaponCollection ?? 0;
     this.lives = data.lives ?? this.lives;
+    this.lastScoreSector = Math.floor(this.score / 100000); // don't re-award on continue
     this.levelProgress = 0;
     this.cauldronFill = [0, 0, 0, 0];
     this.applyWeaponMovementStyle();
@@ -1159,7 +1161,7 @@ export default class GameScene extends Phaser.Scene {
 
     switch (type) {
       case SpecialPaintballType.EXTRA_LIFE:
-        this.lives++;
+        this.lives = Math.min(9, this.lives + 1); // C++ caps lives at 9
         if (this.cache.audio.exists('wizball_new_life_appear_sound')) {
           this.sound.play('wizball_new_life_appear_sound', { volume: 0.6 });
         }
@@ -1833,6 +1835,19 @@ export default class GameScene extends Phaser.Scene {
   // frame and resets whenever an enemy is killed. If it reaches zero (you've gone
   // ~45s without a kill) a Fuzz spawns from the side you're heading toward, to
   // nudge you along.
+  // C++ manage_score_and_enemy_display.txt: a life is granted each time the score
+  // crosses a 100,000 boundary (capped at 9 by function_gain_life).
+  private checkExtraLife(): void {
+    const sector = Math.floor(this.score / 100000);
+    if (sector > this.lastScoreSector) {
+      this.lives = Math.min(9, this.lives + (sector - this.lastScoreSector));
+      this.lastScoreSector = sector;
+      if (this.cache.audio.exists('special_paintball_pickup_extra_life')) {
+        this.sound.play('special_paintball_pickup_extra_life', { volume: 0.6 });
+      }
+    }
+  }
+
   private updateFuzzCounter(): void {
     this.fuzzCounter--;
     if (this.fuzzCounter <= 0) {
@@ -2317,6 +2332,7 @@ export default class GameScene extends Phaser.Scene {
     this.updateCatellite();
     this.enemySystem.update();
     this.updateFuzzCounter();
+    this.checkExtraLife();
     this.warpTubeSystem.update();
     this.warpTubeSystem.checkWarp(this.player);
     this.updateHUD();
