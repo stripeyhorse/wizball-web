@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { Settings } from './config/Settings';
 import BootScene from './scenes/BootScene';
 import PreloadScene from './scenes/PreloadScene';
+import IntroScene from './scenes/IntroScene';
 import TitleScene from './scenes/TitleScene';
 import GetReadyScene from './scenes/GetReadyScene';
 import GameScene from './scenes/GameScene';
@@ -41,7 +42,7 @@ const config: Phaser.Types.Core.GameConfig = {
       debug: false
     }
   },
-  scene: [BootScene, PreloadScene, TitleScene, GetReadyScene, GameScene, LaboratoryScene, BonusLevelScene, GameCompleteScene, GameOverScene, SettingsScene, PauseScene],
+  scene: [BootScene, PreloadScene, IntroScene, TitleScene, GetReadyScene, GameScene, LaboratoryScene, BonusLevelScene, GameCompleteScene, GameOverScene, SettingsScene, PauseScene],
   pixelArt: usePixelArt,
   input: {
     gamepad: true
