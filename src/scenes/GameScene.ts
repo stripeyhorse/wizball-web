@@ -121,9 +121,11 @@ export default class GameScene extends Phaser.Scene {
   private lastMovementDirection: number = 1;
 
   // Catellite state
-  private catelliteControlCounter: number = 0;
+  // Consecutive frames FIRE has been held — the Catellite hands control to the
+  // player once this reaches CATELLITE_CONTROL_THRESHOLD (C++ wizball.txt:389).
+  private fireHeldFrames: number = 0;
   private catellitePreviousYPositions: number[] = [];
-  private catelliteIsPlayerControlled: boolean = true;
+  private catelliteIsPlayerControlled: boolean = false;
   private mutantCatelliteActive: boolean = false;
   private catelliteFireCooldown: number = 0;
 
@@ -1722,6 +1724,28 @@ export default class GameScene extends Phaser.Scene {
     // Add mode switch keys for testing
   }
 
+  // C++ wizball.txt:389 / catellite.txt:327 — holding FIRE for
+  // CATELLITE_CONTROL_THRESHOLD (25) frames hands d-pad control of the Catellite
+  // to the player and disables Wizball movement (allow_movement = false). Mutant
+  // Cat ignores player control (it auto-hunts), and control needs an owned cat.
+  private updateCatelliteControlState(): void {
+    const hasCatellite = (this.weaponCollection & WeaponFlag.CATELLITE) !== 0 && this.catellite.visible;
+    const fireHeld = this.inputManager.isDown('fire') || this.inputManager.isDown('altFire');
+
+    this.fireHeldFrames = fireHeld ? this.fireHeldFrames + 1 : 0;
+
+    this.catelliteIsPlayerControlled =
+      hasCatellite &&
+      !this.mutantCatelliteActive &&
+      this.fireHeldFrames >= CATELLITE_CONTROL_THRESHOLD;
+  }
+
+  // Wizball movement input — suppressed while the player is piloting the
+  // Catellite (the d-pad then steers the Catellite, not the ball).
+  private wizballInput(action: 'moveLeft' | 'moveRight' | 'moveUp' | 'moveDown'): boolean {
+    return !this.catelliteIsPlayerControlled && this.inputManager.isDown(action);
+  }
+
   private updateMovement(): void {
     const body = this.player.body as Phaser.Physics.Arcade.Body;
 
@@ -1807,10 +1831,10 @@ export default class GameScene extends Phaser.Scene {
     // C++ basic_bounce: ideal_x_vel is in fixed-point (0-768), input adds 64 per frame
     const maxVel = WIZBALL_MAX_PIXEL_X_VEL * PRIVATE_SCALE; // 768
 
-    if (this.inputManager.isDown('moveRight')) {
+    if (this.wizballInput('moveRight')) {
       this.idealXVel = Math.min(this.idealXVel + WIZBALL_X_RESPONSIVENESS, maxVel);
     }
-    if (this.inputManager.isDown('moveLeft')) {
+    if (this.wizballInput('moveLeft')) {
       this.idealXVel = Math.max(this.idealXVel - WIZBALL_X_RESPONSIVENESS, -maxVel);
     }
 
@@ -1821,10 +1845,10 @@ export default class GameScene extends Phaser.Scene {
   private updateControlledMovement(): void {
     const maxVel = WIZBALL_MAX_PIXEL_X_VEL * PRIVATE_SCALE; // 768
 
-    if (this.inputManager.isDown('moveRight')) {
+    if (this.wizballInput('moveRight')) {
       this.idealXVel = Math.min(this.idealXVel + WIZBALL_X_RESPONSIVENESS, maxVel);
     }
-    if (this.inputManager.isDown('moveLeft')) {
+    if (this.wizballInput('moveLeft')) {
       this.idealXVel = Math.max(this.idealXVel - WIZBALL_X_RESPONSIVENESS, -maxVel);
     }
 
@@ -1840,10 +1864,10 @@ export default class GameScene extends Phaser.Scene {
 
     // X movement - C++ has TWO SEPARATE IF BLOCKS that BOTH run each frame
     // First block: RIGHT handling
-    if (this.inputManager.isDown('moveRight')) {
+    if (this.wizballInput('moveRight')) {
       this.xVel = Math.min(this.xVel + WIZBALL_X_RESPONSIVENESS, topPrivateVel);
     } else {
-      if (this.inputManager.isDown('moveLeft')) {
+      if (this.wizballInput('moveLeft')) {
         // x_vel = x_vel (do nothing)
       } else {
         if (this.xVel > 0) {
@@ -1853,10 +1877,10 @@ export default class GameScene extends Phaser.Scene {
     }
 
     // Second block: LEFT handling
-    if (this.inputManager.isDown('moveLeft')) {
+    if (this.wizballInput('moveLeft')) {
       this.xVel = Math.max(this.xVel - WIZBALL_X_RESPONSIVENESS, -topPrivateVel);
     } else {
-      if (this.inputManager.isDown('moveRight')) {
+      if (this.wizballInput('moveRight')) {
         // x_vel = x_vel (do nothing)
       } else {
         if (this.xVel < 0) {
@@ -1867,7 +1891,7 @@ export default class GameScene extends Phaser.Scene {
 
     // Y movement - C++ has TWO SEPARATE IF BLOCKS that BOTH run each frame
     // First block: DOWN handling
-    if (this.inputManager.isDown('moveDown')) {
+    if (this.wizballInput('moveDown')) {
       this.yVel = Math.min(this.yVel + WIZBALL_Y_RESPONSIVENESS, topPrivateVel);
     } else {
       if (this.yVel > 0) {
@@ -1876,7 +1900,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     // Second block: UP handling
-    if (this.inputManager.isDown('moveUp')) {
+    if (this.wizballInput('moveUp')) {
       this.yVel = Math.max(this.yVel - WIZBALL_Y_RESPONSIVENESS, -topPrivateVel);
     } else {
       if (this.yVel < 0) {
@@ -1928,17 +1952,8 @@ export default class GameScene extends Phaser.Scene {
       this.catellitePreviousYPositions.shift();
     }
 
-    // Track player movement direction for control threshold
-    const isMoving = Math.abs(this.xVel) > 100 || Math.abs(this.yVel) > 100;
-    if (isMoving) {
-      this.catelliteControlCounter = CATELLITE_CONTROL_THRESHOLD;
-    } else {
-      this.catelliteControlCounter--;
-    }
-
-    // Determine if Catellite is in player control
-    // Mutant Cat: catellite ignores player control and auto-attacks enemies
-    this.catelliteIsPlayerControlled = this.catelliteControlCounter > 0 && !this.mutantCatelliteActive;
+    // catelliteIsPlayerControlled is set each frame by updateCatelliteControlState()
+    // (FIRE held >= threshold), called before updateMovement() in update().
 
     // C++ catellite target: 64px behind wizball on the horizontal axis
     const catelliteHorizontalLagDistance = 64;
@@ -2197,6 +2212,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     this.updateBonusSelectionWobble();
+    this.updateCatelliteControlState();
     this.updateMovement();
     this.checkTileEffects();
     this.updateCatellite();
