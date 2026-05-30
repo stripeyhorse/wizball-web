@@ -79,6 +79,9 @@ export default class PreloadScene extends Phaser.Scene {
       this.load.image(`background_level_${i}`, `assets/sprites/background_level_${i}.png`);
     }
 
+    // Original Amiga title screen (Ocean/Sensible, 1987) for the title screen.
+    this.load.image('wizball_title_screen', 'assets/sprites/wizball_title_screen.png');
+
     // Load [arb] atlas textures and parse frame data
     this.load.atlas('catellite', 'assets/sprites/catellite.png', 'assets/sprites/catellite-atlas.json');
     this.load.atlas('paintballs', 'assets/sprites/paintballs_and_drips.png', 'assets/sprites/paintballs-atlas.json');
