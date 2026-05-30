@@ -87,6 +87,7 @@ const CATELLITE_CONTROLLED_HORIZONTAL_SPEED = 6;
 const CATELLITE_CONTROLLED_VERTICAL_SPEED = 6;
 const CATELLITE_FOLLOWING_HORIZONTAL_SPEED = 4;
 const CATELLITE_CONTROL_THRESHOLD = 25;
+const FUZZ_COUNTER_START = 2700; // C++ FUZZ_COUNTER_START_VALUE — frames of no kills before a Fuzz spawns
 
 // Paint colors
 const PAINT_COLORS = ['RED', 'GREEN', 'BLUE'];
@@ -160,6 +161,7 @@ export default class GameScene extends Phaser.Scene {
   private enemiesKilledThisLevel: number = 0;
   private totalEnemiesInLevel: number = 0;
   private consecutiveEnemyKills: number = 0; // C++: tracks kills for bonus pearl (every 10)
+  private fuzzCounter: number = FUZZ_COUNTER_START; // counts down each frame; spawns a Fuzz at 0
   private rearFireToggle: boolean = false; // C++: alternates rear fire direction each shot
   private spreadFlipSide: boolean = false; // C++ flip_vertical_firing_side: alternates spread fan up/down
   private shieldOrbs: Phaser.Physics.Arcade.Sprite[] = []; // SHIELD_FIRE orbiting cores
@@ -356,6 +358,7 @@ export default class GameScene extends Phaser.Scene {
     // second bullet can overlap the same enemy across frames before it's gone).
     if ((e as any)._dying) return;
     (e as any)._dying = true;
+    this.fuzzCounter = FUZZ_COUNTER_START; // C++: any enemy kill resets the fuzz timer
     const enemyData = (e as any)._data;
     const isPaintBubble = enemyData?.enemyType === 0; // EnemyType.PAINT_BUBBLES
     const isBonusMolecule = enemyData?.enemyType === 9; // EnemyType.BONUS_MOLECULE
@@ -626,6 +629,7 @@ export default class GameScene extends Phaser.Scene {
 
     this.cauldronFill = [0, 0, 0, 0];
     this.levelProgress = 0;
+    this.fuzzCounter = FUZZ_COUNTER_START;
     this.currentPickupCount = 0;
     this.hasPaint = false;
     this.paintIndicator.setAlpha(0.3);
@@ -1808,6 +1812,21 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
+  // C++ main_game_controller.txt:265-274 — the fuzz counter counts down every
+  // frame and resets whenever an enemy is killed. If it reaches zero (you've gone
+  // ~45s without a kill) a Fuzz spawns from the side you're heading toward, to
+  // nudge you along.
+  private updateFuzzCounter(): void {
+    this.fuzzCounter--;
+    if (this.fuzzCounter <= 0) {
+      this.enemySystem.spawnFuzz(this.lastMovementDirection, this.currentLevel);
+      if (this.cache.audio.exists('special_paintball_pickup_filth_raid')) {
+        this.sound.play('special_paintball_pickup_filth_raid', { volume: 0.5 });
+      }
+      this.fuzzCounter = FUZZ_COUNTER_START;
+    }
+  }
+
   private updateMovement(): void {
     const body = this.player.body as Phaser.Physics.Arcade.Body;
 
@@ -2280,6 +2299,7 @@ export default class GameScene extends Phaser.Scene {
     this.checkTileEffects();
     this.updateCatellite();
     this.enemySystem.update();
+    this.updateFuzzCounter();
     this.warpTubeSystem.update();
     this.warpTubeSystem.checkWarp(this.player);
     this.updateHUD();

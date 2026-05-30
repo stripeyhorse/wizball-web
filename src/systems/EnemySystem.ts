@@ -675,6 +675,29 @@ export default class EnemySystem {
     this.enemies.push(enemy);
   }
 
+  // C++ spawn_fuzz.txt: a single Fuzz enters from the side the player is heading
+  // toward (camera centre + dir*HALF_SCREEN_PLUS_ENTRANCE_PHANTOM_ZONE) at mid
+  // height, then crosses the screen via its special path. direction_multiplier =
+  // -last_movement_direction. Driven by the fuzz counter in GameScene.
+  spawnFuzz(playerFacing: number, level: number): void {
+    const HALF_SCREEN_PLUS_ENTRANCE = 344; // constant.txt
+    const dir = playerFacing >= 0 ? 1 : -1;
+    const cam = this.scene.cameras.main;
+    const camCentreX = cam.scrollX + cam.width / 2;
+    const x = camCentreX + dir * HALF_SCREEN_PLUS_ENTRANCE;
+    const y = LEVEL_HEIGHT / 2;
+
+    const wave = this.createWaveConfig(EnemyType.FUZZ, level, 0);
+    this.spawnEnemyFromWave(x, y, wave, level);
+
+    const fuzz = this.enemies[this.enemies.length - 1];
+    const data = fuzz ? (fuzz as any)._data as EnemyData : null;
+    if (fuzz && data) {
+      data.directionMultiplier = -dir;
+      fuzz.setFlipX(data.directionMultiplier < 0);
+    }
+  }
+
   update(): void {
     this.compactEnemyList();
     const speedScale = 60 / PRIVATE_SCALE;
