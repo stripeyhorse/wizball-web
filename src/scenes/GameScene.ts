@@ -2,6 +2,8 @@ import Phaser from 'phaser';
 import { GAME, PAUSE } from '../types/game';
 import { WeaponFlag } from '../types/game';
 import { InputManager } from '../systems/InputManager';
+import { getCauldronTarget, MAX_CAULDRON_CAPACITY, STAGES_PER_LEVEL } from '../data/cauldronTargets';
+import { Depth, TILEMAP_LAYER_DEPTH } from '../config/depths';
 
 enum SpecialPaintballType {
   EXTRA_LIFE = 0,
@@ -150,6 +152,9 @@ export default class GameScene extends Phaser.Scene {
   private currentLevel: number = 1;
   private currentPickupCount: number = 0;
   private cauldronFill: number[] = [0, 0, 0, 0];
+  // C++ level_progress (main_game_controller.txt): 0..2, which of the 3 colour
+  // targets the player is currently mixing toward. Reaches 3 => level complete.
+  private levelProgress: number = 0;
   private enemiesKilledThisLevel: number = 0;
   private totalEnemiesInLevel: number = 0;
   private consecutiveEnemyKills: number = 0; // C++: tracks kills for bonus pearl (every 10)
@@ -190,6 +195,8 @@ export default class GameScene extends Phaser.Scene {
     this.score = data.score ?? 0;
     this.weaponCollection = data.weaponCollection ?? 0;
     this.lives = data.lives ?? this.lives;
+    this.levelProgress = 0;
+    this.cauldronFill = [0, 0, 0, 0];
     this.applyWeaponMovementStyle();
   }
 
@@ -341,7 +348,11 @@ export default class GameScene extends Phaser.Scene {
     const e = enemy as Phaser.Physics.Arcade.Sprite;
     const enemyData = (e as any)._data;
     const isPaintBubble = enemyData?.enemyType === 0; // EnemyType.PAINT_BUBBLES
+    const isBonusMolecule = enemyData?.enemyType === 9; // EnemyType.BONUS_MOLECULE
     const isMolecule = Boolean((e as any)._isMolecule);
+    // The lurking molecule and the bonus-wave molecules are both dedicated
+    // pearl sources; neither rolls the generic special/streak-pearl drops.
+    const dropsPearl = isMolecule || isBonusMolecule;
 
     // Explosion death animation: scale up + fade out
     this.tweens.add({
@@ -354,7 +365,7 @@ export default class GameScene extends Phaser.Scene {
         this.enemiesKilledThisLevel++;
         this.consecutiveEnemyKills++;
 
-        if (isMolecule) {
+        if (dropsPearl) {
           this.spawnBonusPearl(e.x, e.y);
         } else if (isPaintBubble) {
           // Paint bubble enemies drop paintdrops when killed
@@ -363,13 +374,13 @@ export default class GameScene extends Phaser.Scene {
         }
 
         // 5% chance to drop a special paintball pickup
-        if (!isMolecule && Math.random() < 0.05) {
+        if (!dropsPearl && Math.random() < 0.05) {
           const type = Math.floor(Math.random() * 5) as SpecialPaintballType;
           this.spawnSpecialPaintball(e.x, e.y, type);
         }
 
         // C++: every 10 consecutive kills spawns a bonus pearl
-        if (!isMolecule && this.consecutiveEnemyKills % 10 === 0) {
+        if (!dropsPearl && this.consecutiveEnemyKills % 10 === 0) {
           this.spawnBonusPearl(e.x, e.y);
         }
 
@@ -492,12 +503,41 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
-  private checkLevelCompletion(): void {
-    // C++: level is complete when all 3 primary cauldrons are filled to capacity
-    // The flow is: fill 3 cauldrons -> bonus level -> Laboratory -> next level
-    const cauldronsFilled = this.cauldronFill.slice(0, 3).every(f => f >= 20);
+  /** Level is finished once all three colour-match stages are cleared. */
+  private isLevelComplete(): boolean {
+    return this.levelProgress >= STAGES_PER_LEVEL;
+  }
 
-    if (cauldronsFilled) {
+  private checkLevelCompletion(): void {
+    // C++ main_game_controller.txt:1009-1057 — a "stage" is matched when EVERY
+    // primary cauldron (R,G,B) meets-or-exceeds its target for the current
+    // level_progress (target row in level_completion_colours). Each level has 3
+    // such stages; clearing all 3 completes the level.
+    if (this.isLevelComplete()) return;
+
+    const target = getCauldronTarget(this.currentLevel, this.levelProgress);
+    const matched =
+      this.cauldronFill[0] >= target[0] &&
+      this.cauldronFill[1] >= target[1] &&
+      this.cauldronFill[2] >= target[2];
+
+    if (!matched) return;
+
+    // Stage cleared. Consume the paint that was used to hit the target (the C++
+    // gradually drains the cauldrons toward the next colour in the lab; we
+    // subtract the matched amount so any surplus carries to the next stage).
+    for (let i = 0; i < 3; i++) {
+      this.cauldronFill[i] = Math.max(0, this.cauldronFill[i] - target[i]);
+    }
+    this.cauldronSystem.setFillLevels(this.cauldronFill);
+
+    this.levelProgress++;
+
+    if (this.cache.audio.exists('cauldron_full_burst')) {
+      this.sound.play('cauldron_full_burst', { volume: 0.6 });
+    }
+
+    if (this.isLevelComplete()) {
       this.startLevelTransition();
     }
   }
@@ -505,7 +545,7 @@ export default class GameScene extends Phaser.Scene {
   private handlePostEnemyRemoval(): void {
     this.checkLevelCompletion();
 
-    if (!this.cauldronFill.slice(0, 3).every(f => f >= 20) && this.enemySystem.maybeSpawnReplacementWave(this.currentLevel)) {
+    if (!this.isLevelComplete() && this.enemySystem.maybeSpawnReplacementWave(this.currentLevel)) {
       this.totalEnemiesInLevel = this.enemySystem.getActiveEnemyCount();
       if (this.enemySystem.isInMoleculePhase()) {
         return;
@@ -575,6 +615,7 @@ export default class GameScene extends Phaser.Scene {
     const spawn = this.getSpawnPosition();
 
     this.cauldronFill = [0, 0, 0, 0];
+    this.levelProgress = 0;
     this.currentPickupCount = 0;
     this.hasPaint = false;
     this.paintIndicator.setAlpha(0.3);
@@ -778,7 +819,9 @@ export default class GameScene extends Phaser.Scene {
         }
       }
 
-      layer.setDepth(layerIndex + 1);
+      // C++ draw orders: layer 0 = BG (behind entities), layers 1 & 2 = FG/SFG
+      // (in front of the ball/enemies). main_game_controller.txt:868-880.
+      layer.setDepth(TILEMAP_LAYER_DEPTH[layerIndex] ?? Depth.SFG_TILEMAP);
       layer.setCullPadding(1, 1);
       if (layerIndex === 1) {
         layer.setCollision(Array.from(parsedTilemap.solidTiles.values()));
@@ -919,7 +962,7 @@ export default class GameScene extends Phaser.Scene {
     body.setMaxVelocity(9999, 9999); // Don't let Arcade clamp our velocities
     body.moves = false;
 
-    this.player.setDepth(10);
+    this.player.setDepth(Depth.WIZBALL);
     this.playerXFixed = spawn.x * PRIVATE_SCALE;
     this.playerYFixed = spawn.y * PRIVATE_SCALE;
     body.updateFromGameObject();
@@ -927,6 +970,7 @@ export default class GameScene extends Phaser.Scene {
 
   private createCatellite(): void {
     this.catellite = this.physics.add.sprite(280, 150, 'catellite');
+    this.catellite.setDepth(Depth.CATELLITE);
     this.catellite.setDisplaySize(24, 24);
     this.catellite.setVisible(false);
     const body = this.catellite.body as Phaser.Physics.Arcade.Body;
@@ -936,7 +980,7 @@ export default class GameScene extends Phaser.Scene {
     body.setGravityY(0);
 
     this.catelliteBubble = this.add.graphics();
-    this.catelliteBubble.setDepth(9);
+    this.catelliteBubble.setDepth(Depth.CATELLITE_SHIELD);
   }
 
   private createPaintSystem(): void {
@@ -962,18 +1006,29 @@ export default class GameScene extends Phaser.Scene {
     const x = spawnX ?? (50 + Math.random() * Math.max(1, this.worldWidth - 100));
     const y = spawnY ?? 30;
 
-    const paintKeys = ['paint_red', 'paint_green', 'paint_blue'];
-    const sprite = this.physics.add.sprite(x, y, paintKeys[color]);
-    sprite.setDepth(5);
-    sprite.setDisplaySize(16, 16);
+    // C++ paintballs_and_drips atlas frames 3/4/5 are R/G/B teardrop drips (16×32).
+    // Fall back to the procedural paint_* circle if the atlas isn't available.
+    const dripFrames = ['paintballs_3', 'paintballs_4', 'paintballs_5'];
+    const fallbackKeys = ['paint_red', 'paint_green', 'paint_blue'];
+    const useAtlas = this.textures.exists('paintballs');
+    const sprite = useAtlas
+      ? this.physics.add.sprite(x, y, 'paintballs', dripFrames[color])
+      : this.physics.add.sprite(x, y, fallbackKeys[color]);
+    sprite.setDepth(Depth.PAINT);
+    if (useAtlas) {
+      sprite.setDisplaySize(12, 24); // teardrop, taller than wide
+    } else {
+      sprite.setDisplaySize(16, 16);
+    }
 
     const body = sprite.body as Phaser.Physics.Arcade.Body;
-    body.setCircle(6, 2, 2);
+    // Hitbox matches the drip's bulb (bottom of the teardrop)
+    body.setCircle(6, useAtlas ? 0 : 2, useAtlas ? 8 : 2);
     body.setCollideWorldBounds(false);
     body.setAllowGravity(true);
-    body.setGravityY(120);
-    body.setVelocity((Math.random() - 0.5) * 40, 0);
-    body.setBounce(0.4, 0.3);
+    body.setGravityY(160); // original drips fall quickly toward the floor
+    body.setVelocity((Math.random() - 0.5) * 30, 0);
+    body.setBounce(0.2, 0.1);
 
     (sprite as any).paintColor = color;
 
@@ -1042,7 +1097,7 @@ export default class GameScene extends Phaser.Scene {
 
     const textureKey = textureMap[type] ?? textureMap[SpecialPaintballType.EXTRA_LIFE];
     const sprite = this.physics.add.sprite(x, y, textureKey);
-    sprite.setDepth(12);
+    sprite.setDepth(Depth.PEARL);
     sprite.setDisplaySize(32, 32);
     sprite.setBounce(0.5, 0.5);
     sprite.body.setCircle(12, 4, 4);
@@ -1240,7 +1295,7 @@ export default class GameScene extends Phaser.Scene {
 
   private spawnBonusPearl(x: number, y: number): void {
     const pearl = this.physics.add.sprite(x, y, 'pickup', 'pickup_0');
-    pearl.setDepth(12);
+    pearl.setDepth(Depth.PEARL);
     pearl.setDisplaySize(32, 32);
 
     const body = pearl.body as Phaser.Physics.Arcade.Body;
@@ -1496,10 +1551,20 @@ export default class GameScene extends Phaser.Scene {
 
   private collectPaint(_player: any, paint: any): void {
     const paintSprite = paint as Phaser.Physics.Arcade.Sprite;
+    // Guard against the same drop being collected twice in one frame (it can
+    // overlap both the Catellite and the player before the destroy tween runs).
+    if ((paintSprite as any)._collected) return;
+    (paintSprite as any)._collected = true;
+
     const color = (paintSprite as any).paintColor || 0;
 
     this.paintColor = color;
     this.hasPaint = true;
+
+    // C++ main_game_controller.txt:248-255 — on paint-drop pickup the matching
+    // cauldron is incremented by 1, capped at MAX_CAULDRON_CAPACITY.
+    this.cauldronFill[color] = Math.min(this.cauldronFill[color] + 1, MAX_CAULDRON_CAPACITY);
+    this.cauldronSystem.setFillLevels(this.cauldronFill);
 
     // Visual feedback
     this.tweens.add({
@@ -1516,6 +1581,9 @@ export default class GameScene extends Phaser.Scene {
     this.paintIndicator.setAlpha(1);
 
     this.pickupSound.play();
+
+    // A fresh deposit may complete the current colour-match stage.
+    this.checkLevelCompletion();
   }
 
   private fireBullet(): void {
@@ -1575,7 +1643,7 @@ export default class GameScene extends Phaser.Scene {
   private spawnBullet(x: number, y: number, vx: number, vy: number, paintTint?: number): void {
     // Normal bullets use bullets_1 frame (48x8 horizontal bullet per C++ wizball_normal_bullet.txt)
     const bullet = this.physics.add.sprite(x, y, 'bullets', 'bullets_1');
-    bullet.setDepth(8);
+    bullet.setDepth(Depth.WIZBALL_BULLET);
     bullet.setDisplaySize(48, 8);
 
     if (paintTint !== undefined) {
@@ -1611,7 +1679,7 @@ export default class GameScene extends Phaser.Scene {
 
   private spawnCatBullet(x: number, y: number, vx: number, vy: number): void {
     const bullet = this.physics.add.sprite(x, y, 'bullets', 'bullets_4');
-    bullet.setDepth(8);
+    bullet.setDepth(Depth.WIZBALL_BULLET);
     bullet.setDisplaySize(24, 8);
     bullet.setTint(0x88aaff);
     bullet.setVelocity(vx, vy);

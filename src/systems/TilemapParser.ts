@@ -151,7 +151,9 @@ export function parseTilemap(tilemapText: string, tilesetText: string): ParsedTi
   }
 
   // Parse tileset - extract ALL properties per tile
-  const solidTiles = new Set<number>();
+  // Tiles that have any solid side. NOTE: a tile being "solid-sided" is not
+  // enough to be a wall — the collision_mask gate below decides per entity.
+  const solidSidedTiles = new Set<number>();
   const tileDefinitions: TileDefinition[] = [];
   let currentTile = -1;
 
@@ -181,7 +183,7 @@ export function parseTilemap(tilemapText: string, tilesetText: string): ParsedTi
         const rawSolidSides = parseInt(line.split('=')[1].trim(), 10);
         tileDefinition.solidSides = 255 - rawSolidSides;
         if (rawSolidSides > 0) {
-          solidTiles.add(currentTile);
+          solidSidedTiles.add(currentTile);
         }
       } else if (line.startsWith('#COLLISION MASK')) {
         tileDefinition.collisionMask = parseInt(line.split('=')[1].trim(), 10);
@@ -298,6 +300,22 @@ export function parseTilemap(tilemapText: string, tilesetText: string): ParsedTi
   }
 
   maybeCommitSpawnPoint();
+
+  // Build the arcade collision set. C++ world_collision.cpp:1184 only treats a
+  // tile as solid for an entity when (entity_bitmask & tile.collision_mask) != 0.
+  // The player's bitmask is WORLD_BITMASK_PLAYER_COLLIDES = 17, so mask-4 tiles
+  // (e.g. the full-block tile 32) are solid for OTHER entity categories but the
+  // player passes through them. Gating here keeps the arcade colliders in step
+  // with the player's authoritative WorldCollisionMap (which already gates on 17),
+  // and stops enemies/bullets hitting phantom walls.
+  const WORLD_BITMASK_PLAYER_COLLIDES = 17;
+  const solidTiles = new Set<number>();
+  for (const tile of solidSidedTiles) {
+    const def = tileDefinitions[tile];
+    if (def && (def.collisionMask & WORLD_BITMASK_PLAYER_COLLIDES) !== 0) {
+      solidTiles.add(tile);
+    }
+  }
 
   return {
     width,

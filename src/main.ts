@@ -60,4 +60,7 @@ const config: Phaser.Types.Core.GameConfig = {
   }
 };
 
-new Phaser.Game(config);
+const game = new Phaser.Game(config);
+
+// Expose the game instance for debugging / automated verification.
+(window as unknown as { game: Phaser.Game }).game = game;

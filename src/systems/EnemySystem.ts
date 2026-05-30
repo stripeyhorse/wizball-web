@@ -1,4 +1,5 @@
 import * as Phaser from 'phaser';
+import { Depth } from '../config/depths';
 import {
   generateLevelWaves,
   WaveConfig,
@@ -252,7 +253,7 @@ export default class EnemySystem {
       const y = Phaser.Math.Between(slot.minY, slot.maxY);
       const molecule = this.scene.physics.add.sprite(x, y, 'enemies', 0);
       molecule.setDisplaySize(48, 48);
-      molecule.setDepth(5);
+      molecule.setDepth(Depth.ENEMY);
 
       const body = molecule.body as Phaser.Physics.Arcade.Body;
       body.setSize(32, 32);
@@ -389,7 +390,6 @@ export default class EnemySystem {
         break;
 
       case EnemyType.MOLECULE_BOUNCERS:
-      case EnemyType.BONUS_MOLECULE:
         minSpeed = 128;
         maxSpeed = 256;
         gravity = minGravity = maxGravity = 48;
@@ -399,6 +399,17 @@ export default class EnemySystem {
           : (BULLET_TYPE_SINGLE_DIRECTED | BULLET_FREQUENCY_FIXED);
         firingFrequency = Math.max(30, 120 - (level * 5));
         firingInitialDelay = 300;
+        break;
+
+      case EnemyType.BONUS_MOLECULE:
+        // C++ spawn_molecule_bonus_wave.txt:119-131 — zero horizontal/vertical
+        // speed, zero gravity, no firing. They sit still (animated), scattered
+        // in a box around the spawn centre, and drop a bonus pearl when killed.
+        minSpeed = maxSpeed = 0;
+        minVerticalSpeed = maxVerticalSpeed = 0;
+        gravity = minGravity = maxGravity = 0;
+        xSpread = Phaser.Math.Between(0, 96);   // SPECIAL_RAND(±box_width/2), capped 96
+        // firingBehaviour stays BULLET_TYPE_NONE
         break;
 
       case EnemyType.HOLLOW_CIRCLES:
@@ -497,7 +508,7 @@ export default class EnemySystem {
 
     const enemy = this.scene.physics.add.sprite(x, y, spriteKey, frame);
     enemy.setDisplaySize(48, 48);
-    enemy.setDepth(5);
+    enemy.setDepth(Depth.ENEMY);
     enemy.setAlpha(1);
     enemy.setVisible(true);
 
@@ -558,8 +569,14 @@ export default class EnemySystem {
 
       case EnemyType.CRABBY_BOUNCERS:
       case EnemyType.MOLECULE_BOUNCERS:
-      case EnemyType.BONUS_MOLECULE:
         data.yVelFixed = 0;
+        break;
+
+      case EnemyType.BONUS_MOLECULE:
+        // Stationary pearl-dropper: no velocity, no gravity (animates in place).
+        data.xVelFixed = 0;
+        data.yVelFixed = 0;
+        data.gravityFixed = 0;
         break;
 
       case EnemyType.BOBBLE_HATS:
@@ -702,7 +719,8 @@ export default class EnemySystem {
           this.updateSolidDiamondBehaviour(enemy, data);
           break;
         case EnemyType.BONUS_MOLECULE:
-          this.updateBasicBounce(enemy, data, body, speedScale);
+          // Stationary (C++ generic_level_enemy.txt:547 = animation only). No
+          // movement update so it stays where it spawned until shot.
           break;
         case EnemyType.PAINT_BUBBLES:
           this.updatePaintBubbleBehaviour(enemy, data, body, speedScale);
@@ -1240,7 +1258,7 @@ export default class EnemySystem {
     }
 
     const bullet = this.scene.physics.add.sprite(x, y, 'bullets', 'bullets_1');
-    bullet.setDepth(7);
+    bullet.setDepth(Depth.ENEMY_BULLET);
     bullet.setDisplaySize(12, 4);
     bullet.setTint(0xff4444);
 
