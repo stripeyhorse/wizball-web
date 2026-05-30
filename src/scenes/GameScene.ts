@@ -282,7 +282,7 @@ export default class GameScene extends Phaser.Scene {
     }).setOrigin(1, 1).setScrollFactor(0).setDepth(200);
 
     // Initial velocity - C++ starts with a small downward push
-    this.yVel = 2 * PRIVATE_SCALE;
+    this.yVel = 0; // C++ spawns with y_vel = 0; gravity ramps it (wizball.txt)
     this.idealXVel = 0;
 
     playSceneMusic(this, 'wizball_in_game');
@@ -643,7 +643,7 @@ export default class GameScene extends Phaser.Scene {
     this.playerYFixed = spawn.y * PRIVATE_SCALE;
     (this.player.body as Phaser.Physics.Arcade.Body).updateFromGameObject();
     this.xVel = 0;
-    this.yVel = 2 * PRIVATE_SCALE;
+    this.yVel = 0; // C++ spawns with y_vel = 0; gravity ramps it (wizball.txt)
     this.idealXVel = 0;
 
     this.createLevel();
@@ -694,7 +694,7 @@ export default class GameScene extends Phaser.Scene {
     this.playerYFixed = spawn.y * PRIVATE_SCALE;
     (this.player.body as Phaser.Physics.Arcade.Body).updateFromGameObject();
     this.xVel = 0;
-    this.yVel = 2 * PRIVATE_SCALE;
+    this.yVel = 0; // C++ spawns with y_vel = 0; gravity ramps it (wizball.txt)
     this.idealXVel = 0;
 
     this.cauldronSystem.setupCauldrons(this.currentLevel);
@@ -2207,7 +2207,7 @@ export default class GameScene extends Phaser.Scene {
           this.playerXFixed = spawn.x * PRIVATE_SCALE;
           this.playerYFixed = spawn.y * PRIVATE_SCALE;
           this.xVel = 0;
-          this.yVel = 2 * PRIVATE_SCALE;
+          this.yVel = 0; // C++ spawns with y_vel = 0; gravity ramps it (wizball.txt)
           this.idealXVel = 0;
         }
         return;
