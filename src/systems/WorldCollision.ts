@@ -12,6 +12,7 @@ export const DIRECTION_BITVALUE_LEFT = 8;
 export const DIRECTION_BITVALUE_TOTAL = 15;
 
 export const COLL_TYPE_SLIDING_HORIZONTAL = 1;
+export const COLL_TYPE_SLIDING_VERTICAL = 2;
 export const COLLISION_USE_EXTRA_TEST_POINTS = 1024;
 export const COLLISION_ITERATE_MOVEMENT = 2048;
 export const COLLISION_HORIZONTAL_WORLD_EDGE_SOLID = 8192;
@@ -295,7 +296,40 @@ export default class WorldCollisionMap {
         xFixed += xVelocityFixed;
       } else {
         xFixed += pushed.depth << 8;
-        if (remainder !== 0) {
+
+        const slidingHorizontal =
+          (entity.worldCollisionBehaviour & COLL_TYPE_SLIDING_HORIZONTAL) !== 0;
+
+        if (slidingHorizontal && pushed.whichCorner !== NEITHER_CORNER) {
+          // Slide along the corner to burn off the leftover movement instead of
+          // dead-stopping. The push already advanced X by pushed.depth, so probe
+          // from the updated integer position. Evade direction is the obstacle
+          // face we slid against (opposite of travel): moving right hits a
+          // left-facing wall, and vice versa (matches the C++ dispatch).
+          const evadeDirection = xVelocity > 0 ? DIRECTION_LEFT : DIRECTION_RIGHT;
+          const probeWorldX = xFixed >> 8;
+          const slide = this.pushAgainstSlidingCollision(
+            { ...entity, worldX: probeWorldX, worldY },
+            evadeDirection,
+            pushed.whichCorner,
+            remainder,
+            0
+          );
+
+          // Apply the achieved pixel deviation as a fixed-point shift, mirroring
+          // the C++ ENT_X/ENT_Y += (delta << bitshift).
+          xFixed += slide.deltaX << 8;
+          yFixed += slide.deltaY << 8;
+
+          // Only flag a true dead-end: the slide failed to consume the remainder.
+          if (slide.remainder !== 0) {
+            if (xVelocity > 0) {
+              result.hitRight = true;
+            } else {
+              result.hitLeft = true;
+            }
+          }
+        } else if (remainder !== 0) {
           if (xVelocity > 0) {
             result.hitRight = true;
           } else {
@@ -310,6 +344,12 @@ export default class WorldCollisionMap {
       worldX = xFixed >> 8;
     }
 
+    // A horizontal corner-slide may have nudged yFixed (perpendicular slide on
+    // the Y axis); recompute worldY so the vertical push and its yVelocity see
+    // the post-slide position. Mirrors the C++ recomputation of y_vel after the
+    // horizontal block.
+    worldY = yFixed >> 8;
+
     const yVelocity = ((yFixed + yVelocityFixed) >> 8) - worldY;
     if (yVelocity !== 0) {
       const pushed = this.pushVertical({ ...entity, worldX, worldY }, yVelocity);
@@ -319,7 +359,36 @@ export default class WorldCollisionMap {
         yFixed += yVelocityFixed;
       } else {
         yFixed += pushed.depth << 8;
-        if (remainder !== 0) {
+
+        const slidingVertical =
+          (entity.worldCollisionBehaviour & COLL_TYPE_SLIDING_VERTICAL) !== 0;
+
+        if (slidingVertical && pushed.whichCorner !== NEITHER_CORNER) {
+          // Slide along the corner to burn off the leftover movement. Evade
+          // direction is the obstacle face we slid against (opposite of travel):
+          // moving down hits an up-facing wall, and vice versa.
+          const evadeDirection = yVelocity > 0 ? DIRECTION_UP : DIRECTION_DOWN;
+          const probeWorldY = yFixed >> 8;
+          const slide = this.pushAgainstSlidingCollision(
+            { ...entity, worldX, worldY: probeWorldY },
+            evadeDirection,
+            pushed.whichCorner,
+            0,
+            remainder
+          );
+
+          xFixed += slide.deltaX << 8;
+          yFixed += slide.deltaY << 8;
+
+          // Only flag a true dead-end: the slide failed to consume the remainder.
+          if (slide.remainder !== 0) {
+            if (yVelocity > 0) {
+              result.hitDown = true;
+            } else {
+              result.hitUp = true;
+            }
+          }
+        } else if (remainder !== 0) {
           if (yVelocity > 0) {
             result.hitDown = true;
           } else {
@@ -394,6 +463,264 @@ export default class WorldCollisionMap {
     const localX = x & blockSizeMinusOne;
     const localY = y & blockSizeMinusOne;
     return blockDepthProfiles[blockDepthIndex(blockNumber, direction, localX, localY)];
+  }
+
+  // Faithful port of C++ WORLDCOLL_collision_test: returns the per-pixel solidity
+  // (block_solid_profiles) at (x, y) on the given layer, gated by the tile collision
+  // bitmask and clamped to map bounds (out-of-bounds == non-solid).
+  private solidTest(layer: number, x: number, y: number, collisionBitmask: number): number {
+    const blockX = x >> blockSizeBitshift;
+    const blockY = y >> blockSizeBitshift;
+
+    if (blockX < 0 || blockX >= this.width || blockY < 0 || blockY >= this.height) {
+      return 0;
+    }
+
+    const blockOffset = this.tileIndex(layer, blockX, blockY);
+
+    if ((collisionBitmask & this.collisionBitmaskData[blockOffset]) === 0) {
+      return 0;
+    }
+
+    const blockNumber = this.collisionData[blockOffset];
+    const localX = x & blockSizeMinusOne;
+    const localY = y & blockSizeMinusOne;
+    return blockSolidProfiles[blockSolidIndex(blockNumber, localX, localY)];
+  }
+
+  // Faithful port of C++ WORLDCOLL_push_entity_against_sliding_collision.
+  //
+  // After a primary push collided against a corner, this slides the entity
+  // perpendicular to the blocked axis to consume the leftover movement
+  // ("remainder"), so the ball rounds the corner instead of dead-stopping.
+  //
+  // direction is the direction the entity was *trying* to travel (DIRECTION_*),
+  // corner is FIRST_CORNER/SECOND_CORNER (which probe transgressed in the push),
+  // and (xVel, yVel) is the signed remainder along the blocked axis.
+  //
+  // Returns the pixel deviation actually achieved (dx, dy) plus the unused
+  // remainder along the blocked axis. moveEntity applies dx/dy as a fixed-point
+  // shift, mirroring the C++ ENT_X/ENT_Y += (delta << bitshift).
+  //
+  // Corner -> evade-direction mapping (matches the C++ switch exactly):
+  //   DOWN  + FIRST(top-left)    -> slide RIGHT (x_evade +1)
+  //   DOWN  + SECOND(top-right)  -> slide LEFT  (x_evade -1)
+  //   UP    + FIRST(bottom-left) -> slide RIGHT (x_evade +1)
+  //   UP    + SECOND(bottom-right)-> slide LEFT (x_evade -1)
+  //   RIGHT + FIRST(top-left)    -> slide DOWN  (y_evade +1)
+  //   RIGHT + SECOND(bottom-left)-> slide UP    (y_evade -1)
+  //   LEFT  + FIRST(top-right)   -> slide DOWN  (y_evade +1)
+  //   LEFT  + SECOND(bottom-right)-> slide UP   (y_evade -1)
+  private pushAgainstSlidingCollision(
+    entity: WorldCollisionEntity,
+    direction: number,
+    corner: number,
+    xVel: number,
+    yVel: number
+  ): { deltaX: number; deltaY: number; remainder: number } {
+    const totalWidth = entity.upperWorldWidth + entity.lowerWorldWidth;
+    const totalHeight = entity.upperWorldHeight + entity.lowerWorldHeight;
+
+    let x = 0;
+    let y = 0;
+    let xAdder = 0;
+    let yAdder = 0;
+    let distance = 0;
+    let xEvadeAdder = 0;
+    let yEvadeAdder = 0;
+    let evadeBitvalue = 0;
+    let firstCheckXOffset = 0;
+    let firstCheckYOffset = 0;
+    let secondCheckXOffset = 0;
+    let secondCheckYOffset = 0;
+
+    switch (direction) {
+      case DIRECTION_DOWN:
+        if (corner === FIRST_CORNER) {
+          // Primary corner: top-left. Secondaries: top-right and bottom-right.
+          x = entity.worldX - entity.upperWorldWidth;
+          y = entity.worldY - entity.upperWorldHeight;
+          firstCheckXOffset = totalWidth;
+          firstCheckYOffset = 0;
+          secondCheckXOffset = totalWidth;
+          secondCheckYOffset = totalHeight;
+          evadeBitvalue = DIRECTION_BITVALUE_RIGHT;
+          xEvadeAdder = 1;
+          yEvadeAdder = 0;
+        } else {
+          // Primary corner: top-right. Secondaries: top-left and bottom-left.
+          x = entity.worldX + entity.lowerWorldWidth;
+          y = entity.worldY - entity.upperWorldHeight;
+          firstCheckXOffset = -totalWidth;
+          firstCheckYOffset = 0;
+          secondCheckXOffset = -totalWidth;
+          secondCheckYOffset = totalHeight;
+          evadeBitvalue = DIRECTION_BITVALUE_LEFT;
+          xEvadeAdder = -1;
+          yEvadeAdder = 0;
+        }
+        distance = -yVel;
+        yAdder = -1;
+        xAdder = 0;
+        break;
+
+      case DIRECTION_LEFT:
+        if (corner === FIRST_CORNER) {
+          // Primary corner: top-right. Secondaries: bottom-right and bottom-left.
+          x = entity.worldX + entity.lowerWorldWidth;
+          y = entity.worldY - entity.upperWorldHeight;
+          firstCheckXOffset = 0;
+          firstCheckYOffset = totalHeight;
+          secondCheckXOffset = -totalWidth;
+          secondCheckYOffset = totalHeight;
+          evadeBitvalue = DIRECTION_BITVALUE_DOWN;
+          xEvadeAdder = 0;
+          yEvadeAdder = 1;
+        } else {
+          // Primary corner: bottom-right. Secondaries: top-right and top-left.
+          x = entity.worldX + entity.lowerWorldWidth;
+          y = entity.worldY + entity.lowerWorldHeight;
+          firstCheckXOffset = 0;
+          firstCheckYOffset = -totalHeight;
+          secondCheckXOffset = -totalWidth;
+          secondCheckYOffset = -totalHeight;
+          evadeBitvalue = DIRECTION_BITVALUE_UP;
+          xEvadeAdder = 0;
+          yEvadeAdder = -1;
+        }
+        distance = xVel;
+        yAdder = 0;
+        xAdder = 1;
+        break;
+
+      case DIRECTION_UP:
+        if (corner === FIRST_CORNER) {
+          // Primary corner: bottom-left. Secondaries: bottom-right and top-right.
+          x = entity.worldX - entity.upperWorldWidth;
+          y = entity.worldY + entity.lowerWorldHeight;
+          firstCheckXOffset = totalWidth;
+          firstCheckYOffset = 0;
+          secondCheckXOffset = totalWidth;
+          secondCheckYOffset = -totalHeight;
+          evadeBitvalue = DIRECTION_BITVALUE_RIGHT;
+          xEvadeAdder = 1;
+          yEvadeAdder = 0;
+        } else {
+          // Primary corner: bottom-right. Secondaries: bottom-left and top-left.
+          x = entity.worldX + entity.lowerWorldWidth;
+          y = entity.worldY + entity.lowerWorldHeight;
+          firstCheckXOffset = -totalWidth;
+          firstCheckYOffset = 0;
+          secondCheckXOffset = -totalWidth;
+          secondCheckYOffset = -totalHeight;
+          evadeBitvalue = DIRECTION_BITVALUE_LEFT;
+          xEvadeAdder = -1;
+          yEvadeAdder = 0;
+        }
+        distance = yVel;
+        yAdder = 1;
+        xAdder = 0;
+        break;
+
+      case DIRECTION_RIGHT:
+        if (corner === FIRST_CORNER) {
+          // Primary corner: top-left. Secondaries: bottom-left and bottom-right.
+          x = entity.worldX - entity.upperWorldWidth;
+          y = entity.worldY - entity.upperWorldHeight;
+          firstCheckXOffset = 0;
+          firstCheckYOffset = totalHeight;
+          secondCheckXOffset = totalWidth;
+          secondCheckYOffset = totalHeight;
+          evadeBitvalue = DIRECTION_BITVALUE_DOWN;
+          xEvadeAdder = 0;
+          yEvadeAdder = 1;
+        } else {
+          // Primary corner: bottom-left. Secondaries: top-left and top-right.
+          x = entity.worldX - entity.upperWorldWidth;
+          y = entity.worldY + entity.lowerWorldHeight;
+          firstCheckXOffset = 0;
+          firstCheckYOffset = -totalHeight;
+          secondCheckXOffset = totalWidth;
+          secondCheckYOffset = -totalHeight;
+          evadeBitvalue = DIRECTION_BITVALUE_UP;
+          xEvadeAdder = 0;
+          yEvadeAdder = -1;
+        }
+        distance = -xVel;
+        yAdder = 0;
+        xAdder = -1;
+        break;
+
+      default:
+        return { deltaX: 0, deltaY: 0, remainder: direction === DIRECTION_UP || direction === DIRECTION_DOWN ? yVel : xVel };
+    }
+
+    const startX = x;
+    const startY = y;
+    const layer = entity.worldCollisionLayer;
+    const collisionBitmask = entity.worldCollisionBitmask;
+
+    for (let counter = 0; counter < distance; counter++) {
+      const oldX = x;
+      const oldY = y;
+
+      x += xAdder;
+      y += yAdder;
+
+      // Equivalent of WORLDCOLL_collision_offset's 3-way branch:
+      //   non-solid pixel          -> carry on (EXPOSURE_MAP_CARRY_ON)
+      //   solid + evade side open  -> step the evade adder to climb out
+      //   solid + evade side solid -> dead-end, restore previous position
+      if (this.solidTest(layer, x, y, collisionBitmask) === 0) {
+        // Carry on through free space.
+      } else if (
+        this.solidTest(
+          layer,
+          x + (evadeBitvalue === DIRECTION_BITVALUE_RIGHT ? 1 : evadeBitvalue === DIRECTION_BITVALUE_LEFT ? -1 : 0),
+          y + (evadeBitvalue === DIRECTION_BITVALUE_DOWN ? 1 : evadeBitvalue === DIRECTION_BITVALUE_UP ? -1 : 0),
+          collisionBitmask
+        ) === 0
+      ) {
+        // Exposed edge faces the evade direction: climb out of the collision.
+        x += xEvadeAdder;
+        y += yEvadeAdder;
+      } else {
+        // No escape: restore and (below) bail out.
+        x = oldX;
+        y = oldY;
+      }
+
+      // Moving/evading may have shoved one of the other two corners into solid
+      // material; if so, restore the previous position.
+      if (this.solidTest(layer, x + firstCheckXOffset, y + firstCheckYOffset, collisionBitmask)) {
+        x = oldX;
+        y = oldY;
+      } else if (this.solidTest(layer, x + secondCheckXOffset, y + secondCheckYOffset, collisionBitmask)) {
+        x = oldX;
+        y = oldY;
+      }
+
+      if (x === oldX && y === oldY) {
+        // Other corners hit, or we simply made no progress: stop.
+        break;
+      }
+    }
+
+    const deltaX = x - startX;
+    const deltaY = y - startY;
+
+    let remainder: number;
+    switch (direction) {
+      case DIRECTION_DOWN:
+      case DIRECTION_UP:
+        remainder = yVel - deltaY;
+        break;
+      default:
+        remainder = xVel - deltaX;
+        break;
+    }
+
+    return { deltaX, deltaY, remainder };
   }
 
   private getTotalCollisionDepthHorizontal(
