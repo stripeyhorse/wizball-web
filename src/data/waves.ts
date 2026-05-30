@@ -235,39 +235,38 @@ const ENEMY_CONSTANTS: Record<number, Partial<WaveConfig>> = {
 
 // Enemy queue: which types can spawn at each position
 // From C++ enemy_queues.txt
+// Regular-enemy queues per screen position, transcribed from the C++
+// datatables/enemy_queues.txt (sizes from enemy_queue_sizes.txt: 0,7,2,7,6,5,7,8).
+// PAINT_BUBBLES is the leading element of each C++ row but is NOT part of the
+// regular queue (it's the separate bubble-wave path), so it's excluded here.
 const ENEMY_QUEUES: Record<number, EnemyType[]> = {
-  [POSITION_TOP]: [
-    EnemyType.PAINT_BUBBLES, EnemyType.HOLLOW_DIAMONDS,
+  [POSITION_TOP]: [ // 1
+    EnemyType.HOLLOW_DIAMONDS, EnemyType.CRABBY_BOUNCERS, EnemyType.MOLECULE_BOUNCERS,
+    EnemyType.HOLLOW_CIRCLES, EnemyType.BOBBLE_HATS, EnemyType.PLANES, EnemyType.UP_AND_DOWNERS
+  ],
+  [POSITION_MIDDLE]: [ // 2
+    EnemyType.HOLLOW_DIAMONDS, EnemyType.HOLLOW_CIRCLES
+  ],
+  [POSITION_TOP_MIDDLE]: [ // 3
+    EnemyType.HOLLOW_DIAMONDS, EnemyType.CRABBY_BOUNCERS, EnemyType.MOLECULE_BOUNCERS,
+    EnemyType.HOLLOW_CIRCLES, EnemyType.BOBBLE_HATS, EnemyType.PLANES, EnemyType.UP_AND_DOWNERS
+  ],
+  [POSITION_BOTTOM]: [ // 4 (no planes)
+    EnemyType.HOLLOW_DIAMONDS, EnemyType.CRABBY_BOUNCERS, EnemyType.MOLECULE_BOUNCERS,
+    EnemyType.HOLLOW_CIRCLES, EnemyType.BOBBLE_HATS, EnemyType.UP_AND_DOWNERS
+  ],
+  [POSITION_TOP_BOTTOM]: [ // 5 (no hollow diamonds/circles)
     EnemyType.CRABBY_BOUNCERS, EnemyType.MOLECULE_BOUNCERS,
-    EnemyType.HOLLOW_CIRCLES, EnemyType.BOBBLE_HATS, EnemyType.PLANES
+    EnemyType.BOBBLE_HATS, EnemyType.PLANES, EnemyType.UP_AND_DOWNERS
   ],
-  [POSITION_MIDDLE]: [
-    EnemyType.PAINT_BUBBLES, EnemyType.HOLLOW_DIAMONDS
+  [POSITION_MIDDLE_BOTTOM]: [ // 6 (solid diamonds appear)
+    EnemyType.HOLLOW_DIAMONDS, EnemyType.CRABBY_BOUNCERS, EnemyType.MOLECULE_BOUNCERS,
+    EnemyType.HOLLOW_CIRCLES, EnemyType.SOLID_DIAMONDS, EnemyType.BOBBLE_HATS, EnemyType.UP_AND_DOWNERS
   ],
-  [POSITION_TOP_MIDDLE]: [
-    EnemyType.PAINT_BUBBLES, EnemyType.HOLLOW_DIAMONDS,
-    EnemyType.CRABBY_BOUNCERS, EnemyType.MOLECULE_BOUNCERS,
-    EnemyType.HOLLOW_CIRCLES, EnemyType.BOBBLE_HATS, EnemyType.PLANES
-  ],
-  [POSITION_BOTTOM]: [
-    EnemyType.PAINT_BUBBLES, EnemyType.HOLLOW_DIAMONDS,
-    EnemyType.CRABBY_BOUNCERS, EnemyType.MOLECULE_BOUNCERS,
-    EnemyType.HOLLOW_CIRCLES, EnemyType.BOBBLE_HATS
-  ],
-  [POSITION_TOP_BOTTOM]: [
-    EnemyType.PAINT_BUBBLES, EnemyType.CRABBY_BOUNCERS,
-    EnemyType.MOLECULE_BOUNCERS, EnemyType.BOBBLE_HATS, EnemyType.PLANES
-  ],
-  [POSITION_MIDDLE_BOTTOM]: [
-    EnemyType.PAINT_BUBBLES, EnemyType.HOLLOW_DIAMONDS,
-    EnemyType.CRABBY_BOUNCERS, EnemyType.MOLECULE_BOUNCERS,
-    EnemyType.HOLLOW_CIRCLES, EnemyType.SOLID_DIAMONDS, EnemyType.BOBBLE_HATS
-  ],
-  [POSITION_ALL]: [
-    EnemyType.PAINT_BUBBLES, EnemyType.HOLLOW_DIAMONDS,
-    EnemyType.CRABBY_BOUNCERS, EnemyType.MOLECULE_BOUNCERS,
-    EnemyType.HOLLOW_CIRCLES, EnemyType.SOLID_DIAMONDS,
-    EnemyType.BOBBLE_HATS, EnemyType.PLANES
+  [POSITION_ALL]: [ // 7 (all)
+    EnemyType.HOLLOW_DIAMONDS, EnemyType.CRABBY_BOUNCERS, EnemyType.MOLECULE_BOUNCERS,
+    EnemyType.HOLLOW_CIRCLES, EnemyType.SOLID_DIAMONDS, EnemyType.BOBBLE_HATS,
+    EnemyType.PLANES, EnemyType.UP_AND_DOWNERS
   ],
 };
 
