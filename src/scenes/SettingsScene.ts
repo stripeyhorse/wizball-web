@@ -1,14 +1,22 @@
 import Phaser from 'phaser';
 import { SETTINGS } from '../types/game';
-import type { ActionName } from '../types/settings';
+import type { ActionName, TouchControlsMode } from '../types/settings';
+import { CRT_MODES, TOUCH_CONTROL_MODES } from '../types/settings';
 import { Settings } from '../config/Settings';
 import { DEFAULT_SETTINGS } from '../config/DefaultSettings';
 
-const TABS = ['Graphics', 'Controls', 'Gamepad'] as const;
-const CRT_MODES = ['off', 'c64', 'amiga'] as const;
+const TABS = ['Graphics', 'Audio', 'Controls', 'Gamepad'] as const;
+
 function crtLabel(mode: string): string {
   return mode === 'c64' ? 'C64' : mode === 'amiga' ? 'AMIGA 500' : 'OFF';
 }
+function touchLabel(mode: TouchControlsMode): string {
+  return mode === 'on' ? 'ALWAYS' : mode === 'off' ? 'NEVER' : 'AUTO';
+}
+function pct(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
 const ACTION_LABELS: Record<ActionName, string> = {
   moveLeft: 'Move Left',
   moveRight: 'Move Right',
@@ -64,11 +72,13 @@ export default class SettingsScene extends Phaser.Scene {
   // UI containers per tab
   private tabTexts: Phaser.GameObjects.Text[] = [];
   private graphicsContainer!: Phaser.GameObjects.Container;
+  private audioContainer!: Phaser.GameObjects.Container;
   private controlsContainer!: Phaser.GameObjects.Container;
   private gamepadContainer!: Phaser.GameObjects.Container;
 
   // Rebuild-able UI elements
   private graphicsItems: Phaser.GameObjects.Text[] = [];
+  private audioItems: Phaser.GameObjects.Text[] = [];
   private controlItems: Phaser.GameObjects.Text[] = [];
   private gamepadItems: Phaser.GameObjects.Text[] = [];
 
@@ -78,7 +88,6 @@ export default class SettingsScene extends Phaser.Scene {
     down: Phaser.Input.Keyboard.Key;
     left: Phaser.Input.Keyboard.Key;
     right: Phaser.Input.Keyboard.Key;
-    confirm: Phaser.Input.Keyboard.Key;
     back: Phaser.Input.Keyboard.Key;
     tabNext: Phaser.Input.Keyboard.Key;
     tabPrev: Phaser.Input.Keyboard.Key;
@@ -100,6 +109,14 @@ export default class SettingsScene extends Phaser.Scene {
     this.activeTab = 0;
     this.selectedRow = 0;
     this.isCapturing = false;
+    this.captureAction = null;
+    // Scene objects are destroyed on shutdown; drop the stale references too so
+    // a second visit doesn't refresh/highlight the previous visit's Text objects.
+    this.tabTexts = [];
+    this.graphicsItems = [];
+    this.audioItems = [];
+    this.controlItems = [];
+    this.gamepadItems = [];
 
     // Full overlay background
     this.add.rectangle(320, 208, 640, 416, 0x111122, 0.95).setDepth(0);
@@ -111,17 +128,26 @@ export default class SettingsScene extends Phaser.Scene {
 
     // Tab headers
     this.tabTexts = TABS.map((tab, i) => {
-      const t = this.add.text(120 + i * 200, 55, tab, {
+      const t = this.add.text(92 + i * 152, 55, tab, {
         fontSize: '16px', color: '#888888', fontFamily: 'monospace',
       }).setOrigin(0.5).setDepth(1);
-      t.setInteractive();
+      t.setPadding(10, 8, 10, 8);
+      t.setInteractive({ useHandCursor: true });
       t.on('pointerdown', () => { this.activeTab = i; this.selectedRow = 0; this.refreshUI(); });
       return t;
     });
 
+    // Close button — the only way out of here on a touch device.
+    const closeButton = this.add.text(320, 330, '[ CLOSE ]', {
+      fontSize: '14px', color: '#88ccff', fontFamily: 'monospace',
+    }).setOrigin(0.5).setDepth(2);
+    closeButton.setPadding(14, 12, 14, 12);
+    closeButton.setInteractive({ useHandCursor: true });
+    closeButton.on('pointerdown', () => this.closeSettings());
+
     // Tab hint
-    this.add.text(320, 390, 'Q/E: Switch Tab | UP/DOWN: Navigate | ENTER: Select | ESC: Back', {
-      fontSize: '10px', color: '#666666', fontFamily: 'monospace',
+    this.add.text(320, 392, 'Q/E: Switch Tab | UP/DOWN: Navigate | LEFT/RIGHT: Adjust | ENTER: Select | ESC: Back', {
+      fontSize: '9px', color: '#666666', fontFamily: 'monospace',
     }).setOrigin(0.5).setDepth(1);
 
     // Capture status
@@ -136,6 +162,7 @@ export default class SettingsScene extends Phaser.Scene {
 
     // Create tab containers
     this.graphicsContainer = this.add.container(0, 0).setDepth(1);
+    this.audioContainer = this.add.container(0, 0).setDepth(1);
     this.controlsContainer = this.add.container(0, 0).setDepth(1);
     this.gamepadContainer = this.add.container(0, 0).setDepth(1);
 
@@ -146,13 +173,38 @@ export default class SettingsScene extends Phaser.Scene {
       down: kb.addKey(Phaser.Input.Keyboard.KeyCodes.DOWN, false),
       left: kb.addKey(Phaser.Input.Keyboard.KeyCodes.LEFT, false),
       right: kb.addKey(Phaser.Input.Keyboard.KeyCodes.RIGHT, false),
-      confirm: kb.addKey(Phaser.Input.Keyboard.KeyCodes.ENTER, false),
       back: kb.addKey(Phaser.Input.Keyboard.KeyCodes.ESC, false),
       tabNext: kb.addKey(Phaser.Input.Keyboard.KeyCodes.E, false),
       tabPrev: kb.addKey(Phaser.Input.Keyboard.KeyCodes.Q, false),
     };
 
+    // ENTER is handled as an *event* rather than polled in update(). Phaser
+    // dispatches keyboard events synchronously from the DOM handler (see
+    // KeyboardManager.onKeyDown -> MANAGER_PROCESS -> KeyboardPlugin.update in
+    // node_modules/phaser/src/input/keyboard/KeyboardManager.js:196), so we are
+    // still inside the user gesture — which is the only place a browser will
+    // honour requestFullscreen(). Polling it from update() ran in a rAF tick,
+    // where the request is rejected and Phaser swallows the failure.
+    kb.on('keydown-ENTER', this.onConfirmKey, this);
+
+    // The Fullscreen row reads this.scale.isFullscreen, which only flips once
+    // the browser fires fullscreenchange — after our toggle has returned. The
+    // ScaleManager is global, so these have to come off again on shutdown.
+    this.scale.on(Phaser.Scale.Events.ENTER_FULLSCREEN, this.refreshUI, this);
+    this.scale.on(Phaser.Scale.Events.LEAVE_FULLSCREEN, this.refreshUI, this);
+
+    // The on-screen D-pad/FIRE would otherwise sit on top of this menu doing
+    // nothing. Restored on shutdown, whichever way the menu was closed.
+    this.settings.setTouchOverlayHidden(true);
+
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.scale.off(Phaser.Scale.Events.ENTER_FULLSCREEN, this.refreshUI, this);
+      this.scale.off(Phaser.Scale.Events.LEAVE_FULLSCREEN, this.refreshUI, this);
+      this.settings.setTouchOverlayHidden(false);
+    });
+
     this.buildGraphicsTab();
+    this.buildAudioTab();
     this.buildControlsTab();
     this.buildGamepadTab();
     this.refreshUI();
@@ -185,51 +237,104 @@ export default class SettingsScene extends Phaser.Scene {
       this.selectedRow = (this.selectedRow + 1) % items.length;
       this.refreshUI();
     }
-    if (Phaser.Input.Keyboard.JustDown(this.navKeys.confirm)) {
-      this.activateItem();
-    }
     if (Phaser.Input.Keyboard.JustDown(this.navKeys.left)) {
       this.adjustItem(-1);
     }
     if (Phaser.Input.Keyboard.JustDown(this.navKeys.right)) {
       this.adjustItem(1);
     }
+
+    // The Gamepad tab shows a live stick/button readout.
+    if (this.activeTab === 3) this.refreshGamepadTab();
+  }
+
+  private onConfirmKey(event: KeyboardEvent): void {
+    if (event.repeat || this.isCapturing) return;
+    event.preventDefault();
+    this.activateItem();
+  }
+
+  // Rows double as touch targets: tapping one selects and activates it, and
+  // because pointer events are also dispatched synchronously from the DOM
+  // handler, fullscreen works from a tap too.
+  private makeRow(
+    container: Phaser.GameObjects.Container,
+    x: number, y: number, text: string, style: Phaser.Types.GameObjects.Text.TextStyle,
+    onTap: () => void
+  ): Phaser.GameObjects.Text {
+    const t = this.make.text({ x, y, text, style });
+    t.setOrigin(0.5);
+    t.setPadding(8, 5, 8, 5);
+    t.setInteractive({ useHandCursor: true });
+    t.on('pointerdown', onTap);
+    container.add(t);
+    return t;
+  }
+
+  private selectAndActivate(row: number): void {
+    this.selectedRow = row;
+    this.refreshUI();
+    this.activateItem();
   }
 
   // ---- Graphics Tab ----
 
   private buildGraphicsTab(): void {
-    const cfg = this.settings.get().graphics;
-    const items = [
-      `Resolution Scale: ${cfg.resolutionScale}x`,
-      `Fullscreen: ${cfg.fullscreen ? 'ON' : 'OFF'}`,
-      `Pixel Smoothing: ${cfg.pixelArtSmoothing ? 'ON' : 'OFF'}`,
-      `Show FPS: ${cfg.showFPS ? 'ON' : 'OFF'}`,
-      `CRT Filter: < ${crtLabel(cfg.crtMode)} >`,
-    ];
+    const style = { fontSize: '14px', color: '#cccccc', fontFamily: 'monospace' };
+    this.graphicsItems = this.graphicsLabels().map((label, i) =>
+      this.makeRow(this.graphicsContainer, 320, 90 + i * 32, label, style, () => this.selectAndActivate(i))
+    );
+  }
 
-    this.graphicsItems = items.map((label, i) => {
-      const t = this.make.text({
-        x: 320, y: 90 + i * 32,
-        text: label,
-        style: { fontSize: '14px', color: '#cccccc', fontFamily: 'monospace' },
-      });
-      t.setOrigin(0.5);
-      this.graphicsContainer.add(t);
-      return t;
-    });
+  private graphicsLabels(): string[] {
+    const cfg = this.settings.get();
+    return [
+      // Read the live scale-manager state rather than a stored flag: fullscreen
+      // can only be entered from a gesture, so a persisted "ON" would be a lie
+      // every time the page reloads.
+      `Fullscreen: ${this.scale.isFullscreen ? 'ON' : 'OFF'}`,
+      `Pixel Smoothing: ${cfg.graphics.pixelArtSmoothing ? 'ON' : 'OFF'}`,
+      `Show FPS: ${cfg.graphics.showFPS ? 'ON' : 'OFF'}`,
+      `CRT Filter: < ${crtLabel(cfg.graphics.crtMode)} >`,
+      `Touch Controls: < ${touchLabel(cfg.ui.touchControls)} >`,
+    ];
   }
 
   private refreshGraphicsTab(): void {
-    const cfg = this.settings.get().graphics;
-    const labels = [
-      `Resolution Scale: < ${cfg.resolutionScale}x >`,
-      `Fullscreen: ${cfg.fullscreen ? 'ON' : 'OFF'}`,
-      `Pixel Smoothing: ${cfg.pixelArtSmoothing ? 'ON' : 'OFF'}`,
-      `Show FPS: ${cfg.showFPS ? 'ON' : 'OFF'}`,
-      `CRT Filter: < ${crtLabel(cfg.crtMode)} >`,
-    ];
+    const labels = this.graphicsLabels();
     this.graphicsItems.forEach((t, i) => t.setText(labels[i]));
+  }
+
+  // ---- Audio Tab ----
+
+  private buildAudioTab(): void {
+    const style = { fontSize: '14px', color: '#cccccc', fontFamily: 'monospace' };
+    this.audioItems = this.audioLabels().map((label, i) =>
+      this.makeRow(this.audioContainer, 320, 90 + i * 32, label, style, () => this.selectAndActivate(i))
+    );
+
+    const hint = this.make.text({
+      x: 320, y: 240,
+      text: 'LEFT / RIGHT adjusts by 10%. Tap a row to nudge it up.',
+      style: { fontSize: '10px', color: '#777777', fontFamily: 'monospace' },
+    });
+    hint.setOrigin(0.5);
+    this.audioContainer.add(hint);
+  }
+
+  private audioLabels(): string[] {
+    const a = this.settings.get().audio;
+    return [
+      `Master Volume: < ${pct(a.master)} >`,
+      `Music Volume:  < ${pct(a.music)} >`,
+      `SFX Volume:    < ${pct(a.sfx)} >`,
+      `Mute All: ${a.muted ? 'ON' : 'OFF'}`,
+    ];
+  }
+
+  private refreshAudioTab(): void {
+    const labels = this.audioLabels();
+    this.audioItems.forEach((t, i) => t.setText(labels[i]));
   }
 
   // ---- Controls Tab ----
@@ -237,29 +342,21 @@ export default class SettingsScene extends Phaser.Scene {
   private buildControlsTab(): void {
     const cfg = this.settings.get();
     const actions = Object.keys(ACTION_LABELS) as ActionName[];
+    const style = { fontSize: '12px', color: '#cccccc', fontFamily: 'monospace' };
 
     this.controlItems = actions.map((action, i) => {
       const binding = cfg.bindings[action];
       const label = `${ACTION_LABELS[action]}: [${getKeyName(binding.keyboard)}] [${getButtonName(binding.gamepadButton)}]`;
-      const t = this.make.text({
-        x: 320, y: 90 + i * 28,
-        text: label,
-        style: { fontSize: '12px', color: '#cccccc', fontFamily: 'monospace' },
-      });
-      t.setOrigin(0.5);
-      this.controlsContainer.add(t);
-      return t;
+      return this.makeRow(this.controlsContainer, 320, 90 + i * 28, label, style, () => this.selectAndActivate(i));
     });
 
     // Add reset option
-    const resetText = this.make.text({
-      x: 320, y: 90 + actions.length * 28 + 10,
-      text: '[ Reset to Defaults ]',
-      style: { fontSize: '12px', color: '#ff8888', fontFamily: 'monospace' },
-    });
-    resetText.setOrigin(0.5);
-    this.controlsContainer.add(resetText);
-    this.controlItems.push(resetText);
+    const resetIndex = actions.length;
+    this.controlItems.push(this.makeRow(
+      this.controlsContainer, 320, 90 + resetIndex * 28 + 10, '[ Reset to Defaults ]',
+      { fontSize: '12px', color: '#ff8888', fontFamily: 'monospace' },
+      () => this.selectAndActivate(resetIndex)
+    ));
   }
 
   private refreshControlsTab(): void {
@@ -267,7 +364,7 @@ export default class SettingsScene extends Phaser.Scene {
     const actions = Object.keys(ACTION_LABELS) as ActionName[];
     actions.forEach((action, i) => {
       const binding = cfg.bindings[action];
-      this.controlItems[i].setText(
+      this.controlItems[i]?.setText(
         `${ACTION_LABELS[action]}: [${getKeyName(binding.keyboard)}] [${getButtonName(binding.gamepadButton)}]`
       );
     });
@@ -277,24 +374,17 @@ export default class SettingsScene extends Phaser.Scene {
 
   private buildGamepadTab(): void {
     const cfg = this.settings.get().gamepad;
+    const style = { fontSize: '14px', color: '#cccccc', fontFamily: 'monospace' };
     const items = [
       `Deadzone: < ${(cfg.deadzone * 100).toFixed(0)}% >`,
       `Analog Movement: ${cfg.analogMovement ? 'ON' : 'OFF'}`,
-      '',  // spacer for live display
     ];
 
-    this.gamepadItems = items.map((label, i) => {
-      const t = this.make.text({
-        x: 320, y: 90 + i * 32,
-        text: label,
-        style: { fontSize: '14px', color: '#cccccc', fontFamily: 'monospace' },
-      });
-      t.setOrigin(0.5);
-      this.gamepadContainer.add(t);
-      return t;
-    });
+    this.gamepadItems = items.map((label, i) =>
+      this.makeRow(this.gamepadContainer, 320, 90 + i * 32, label, style, () => this.selectAndActivate(i))
+    );
 
-    // Live gamepad status
+    // Live gamepad status (not selectable — see getActiveItems)
     const statusText = this.make.text({
       x: 320, y: 200,
       text: 'No gamepad connected',
@@ -311,13 +401,13 @@ export default class SettingsScene extends Phaser.Scene {
     this.gamepadItems[1]?.setText(`Analog Movement: ${cfg.analogMovement ? 'ON' : 'OFF'}`);
 
     // Update live gamepad status
-    const statusText = this.gamepadItems[3];
+    const statusText = this.gamepadItems[2];
     if (statusText && this.input.gamepad) {
       const pad = this.input.gamepad.getPad(0);
       if (pad) {
         const lx = pad.axes[0]?.getValue().toFixed(2) ?? '0';
         const ly = pad.axes[1]?.getValue().toFixed(2) ?? '0';
-        const btns = pad.buttons.filter(b => b.pressed).map((_, i) => i).join(',');
+        const btns = pad.buttons.map((b, i) => (b.pressed ? i : -1)).filter(i => i >= 0).join(',');
         statusText.setText(`Pad: ${pad.id.substring(0, 30)}\nStick: (${lx}, ${ly})  Btns: [${btns || 'none'}]`);
       } else {
         statusText.setText('No gamepad connected');
@@ -330,8 +420,9 @@ export default class SettingsScene extends Phaser.Scene {
   private getActiveItems(): Phaser.GameObjects.Text[] {
     switch (this.activeTab) {
       case 0: return this.graphicsItems;
-      case 1: return this.controlItems;
-      case 2: return this.gamepadItems.slice(0, 2); // Only deadzone and analog are selectable
+      case 1: return this.audioItems;
+      case 2: return this.controlItems;
+      case 3: return this.gamepadItems.slice(0, 2); // Only deadzone and analog are selectable
       default: return [];
     }
   }
@@ -344,13 +435,15 @@ export default class SettingsScene extends Phaser.Scene {
 
     // Show/hide containers
     this.graphicsContainer.setVisible(this.activeTab === 0);
-    this.controlsContainer.setVisible(this.activeTab === 1);
-    this.gamepadContainer.setVisible(this.activeTab === 2);
+    this.audioContainer.setVisible(this.activeTab === 1);
+    this.controlsContainer.setVisible(this.activeTab === 2);
+    this.gamepadContainer.setVisible(this.activeTab === 3);
 
     // Refresh content
     if (this.activeTab === 0) this.refreshGraphicsTab();
-    if (this.activeTab === 1) this.refreshControlsTab();
-    if (this.activeTab === 2) this.refreshGamepadTab();
+    if (this.activeTab === 1) this.refreshAudioTab();
+    if (this.activeTab === 2) this.refreshControlsTab();
+    if (this.activeTab === 3) this.refreshGamepadTab();
 
     // Highlight selected row
     const items = this.getActiveItems();
@@ -362,19 +455,20 @@ export default class SettingsScene extends Phaser.Scene {
   }
 
   private activateItem(): void {
-    if (this.activeTab === 0) {
-      this.toggleGraphicsItem();
-    } else if (this.activeTab === 1) {
-      this.startKeyCapture();
-    } else if (this.activeTab === 2) {
-      this.toggleGamepadItem();
+    switch (this.activeTab) {
+      case 0: this.toggleGraphicsItem(); break;
+      case 1: this.toggleAudioItem(); break;
+      case 2: this.startKeyCapture(); break;
+      case 3: this.toggleGamepadItem(); break;
     }
   }
 
   private adjustItem(direction: number): void {
     if (this.activeTab === 0) {
       this.adjustGraphicsItem(direction);
-    } else if (this.activeTab === 2) {
+    } else if (this.activeTab === 1) {
+      this.adjustAudioItem(direction);
+    } else if (this.activeTab === 3) {
       this.adjustGamepadItem(direction);
     }
   }
@@ -382,35 +476,34 @@ export default class SettingsScene extends Phaser.Scene {
   private toggleGraphicsItem(): void {
     const cfg = this.settings.get();
     switch (this.selectedRow) {
-      case 1: // Fullscreen
-        cfg.graphics.fullscreen = !cfg.graphics.fullscreen;
-        break;
-      case 2: // Pixel smoothing
+      case 0: // Fullscreen — only works because we are inside a real gesture
+        this.settings.toggleFullscreen(this.game);
+        this.refreshUI();
+        return;
+      case 1: // Pixel smoothing
         cfg.graphics.pixelArtSmoothing = !cfg.graphics.pixelArtSmoothing;
         this.restartNotice.setText('* Pixel smoothing change requires page reload *');
         break;
-      case 3: // Show FPS
+      case 2: // Show FPS
         cfg.graphics.showFPS = !cfg.graphics.showFPS;
         break;
-      case 4: // CRT filter — ENTER cycles forward
+      case 3: // CRT filter — ENTER cycles forward
         this.cycleCRT(1);
+        return;
+      case 4: // Touch controls overlay
+        this.cycleTouchControls(1);
         return;
     }
     this.settings.save();
+    this.game.events.emit('settings:changed');
     this.refreshUI();
   }
 
   private adjustGraphicsItem(direction: number): void {
-    const cfg = this.settings.get();
-    if (this.selectedRow === 0) { // Resolution scale
-      const scales = [1, 1.5, 2];
-      const idx = scales.indexOf(cfg.graphics.resolutionScale);
-      const newIdx = Math.max(0, Math.min(scales.length - 1, idx + direction));
-      cfg.graphics.resolutionScale = scales[newIdx];
-      this.settings.save();
-      this.refreshUI();
-    } else if (this.selectedRow === 4) { // CRT filter
+    if (this.selectedRow === 3) {
       this.cycleCRT(direction);
+    } else if (this.selectedRow === 4) {
+      this.cycleTouchControls(direction);
     }
   }
 
@@ -426,11 +519,63 @@ export default class SettingsScene extends Phaser.Scene {
     this.refreshUI();
   }
 
+  private cycleTouchControls(direction: number): void {
+    const cfg = this.settings.get();
+    const idx = TOUCH_CONTROL_MODES.indexOf(cfg.ui.touchControls);
+    const next = (idx + direction + TOUCH_CONTROL_MODES.length) % TOUCH_CONTROL_MODES.length;
+    cfg.ui.touchControls = TOUCH_CONTROL_MODES[next];
+    this.settings.save();
+    this.game.events.emit('settings:changed'); // main.ts re-applies the overlay
+    this.refreshUI();
+  }
+
+  // ---- Audio ----
+
+  private toggleAudioItem(): void {
+    const audio = this.settings.get().audio;
+    if (this.selectedRow === 3) {
+      audio.muted = !audio.muted;
+      this.commitAudio(false);
+    } else {
+      // Tapping a slider row nudges it up — the only way to move it on touch.
+      this.adjustAudioItem(1);
+    }
+  }
+
+  private adjustAudioItem(direction: number): void {
+    const audio = this.settings.get().audio;
+    const step = 0.1 * direction;
+    const bump = (v: number): number => Math.round(Math.min(1, Math.max(0, v + step)) * 100) / 100;
+
+    switch (this.selectedRow) {
+      case 0: audio.master = bump(audio.master); break;
+      case 1: audio.music = bump(audio.music); break;
+      case 2: audio.sfx = bump(audio.sfx); break;
+      default: return; // Mute is a toggle (ENTER / tap), not a slider
+    }
+    // Blip at the new level so you can hear what you set — but not for the music
+    // row, where the change is already audible in the track that is playing.
+    this.commitAudio(this.selectedRow !== 1 && !audio.muted);
+  }
+
+  private commitAudio(preview: boolean): void {
+    this.settings.save();
+    this.game.events.emit('settings:changed'); // main.ts pushes it to the mixer
+    this.refreshUI();
+    // Blip at the new level so you can hear what you just set.
+    if (preview && this.cache.audio.exists('menu_selector_move')) {
+      this.sound.play('menu_selector_move');
+    }
+  }
+
+  // ---- Gamepad ----
+
   private toggleGamepadItem(): void {
     const cfg = this.settings.get();
     if (this.selectedRow === 1) { // Analog movement
       cfg.gamepad.analogMovement = !cfg.gamepad.analogMovement;
       this.settings.save();
+      this.game.events.emit('settings:changed');
       this.refreshUI();
     }
   }
@@ -445,12 +590,15 @@ export default class SettingsScene extends Phaser.Scene {
     }
   }
 
+  // ---- Key rebinding ----
+
   private startKeyCapture(): void {
     const actions = Object.keys(ACTION_LABELS) as ActionName[];
 
     // Last item is "Reset to Defaults"
     if (this.selectedRow >= actions.length) {
       this.settings.update({ bindings: structuredClone(DEFAULT_SETTINGS.bindings) });
+      this.game.events.emit('settings:changed');
       this.refreshControlsTab();
       this.refreshUI();
       return;
@@ -470,20 +618,15 @@ export default class SettingsScene extends Phaser.Scene {
         return;
       }
 
+      const cfg = this.settings.get();
       if (event.keyCode === Phaser.Input.Keyboard.KeyCodes.DELETE ||
           event.keyCode === Phaser.Input.Keyboard.KeyCodes.BACKSPACE) {
         // Unbind keyboard
-        const cfg = this.settings.get();
         cfg.bindings[this.captureAction!].keyboard = null;
-        this.settings.save();
-        this.game.events.emit('settings:changed');
-        this.endCapture();
-        return;
+      } else {
+        // Set the new binding
+        cfg.bindings[this.captureAction!].keyboard = event.keyCode;
       }
-
-      // Set the new binding
-      const cfg = this.settings.get();
-      cfg.bindings[this.captureAction!].keyboard = event.keyCode;
       this.settings.save();
       this.game.events.emit('settings:changed');
       this.endCapture();
@@ -492,9 +635,9 @@ export default class SettingsScene extends Phaser.Scene {
     // Use raw DOM event to capture any key including ones Phaser might swallow
     window.addEventListener('keydown', handler, { once: true, capture: true });
 
-    // Also listen for gamepad button
+    let padHandler: ((pad: Phaser.Input.Gamepad.Gamepad, button: Phaser.Input.Gamepad.Button, value: number) => void) | null = null;
     if (this.input.gamepad) {
-      const padHandler = (_pad: Phaser.Input.Gamepad.Gamepad, button: Phaser.Input.Gamepad.Button, _value: number) => {
+      padHandler = (_pad, button) => {
         const cfg = this.settings.get();
         cfg.bindings[this.captureAction!].gamepadButton = button.index;
         this.settings.save();
@@ -503,16 +646,17 @@ export default class SettingsScene extends Phaser.Scene {
         this.endCapture();
       };
       this.input.gamepad.once('down', padHandler);
-
-      // Timeout — cancel after 5 seconds
-      this.time.delayedCall(5000, () => {
-        if (this.isCapturing) {
-          window.removeEventListener('keydown', handler, { capture: true });
-          this.input.gamepad?.off('down', padHandler);
-          this.endCapture();
-        }
-      });
     }
+
+    // Timeout — cancel after 5 seconds. Unconditional: on a touch device there
+    // may be no keyboard *or* gamepad to end the capture with, and without this
+    // the menu would be stuck refusing to navigate.
+    this.time.delayedCall(5000, () => {
+      if (!this.isCapturing) return;
+      window.removeEventListener('keydown', handler, { capture: true });
+      if (padHandler) this.input.gamepad?.off('down', padHandler);
+      this.endCapture();
+    });
   }
 
   private endCapture(): void {
@@ -523,8 +667,8 @@ export default class SettingsScene extends Phaser.Scene {
   }
 
   private closeSettings(): void {
-    // Apply graphics settings
-    this.settings.applyGraphics(this.game);
+    // main.ts listens for this and re-applies audio + the touch overlay; the CRT
+    // pipeline hook picks it up too. Everything else was saved as it was changed.
     this.game.events.emit('settings:changed');
 
     this.scene.stop(SETTINGS);

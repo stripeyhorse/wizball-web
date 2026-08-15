@@ -15,6 +15,7 @@ export const COLL_TYPE_SLIDING_HORIZONTAL = 1;
 export const COLL_TYPE_SLIDING_VERTICAL = 2;
 export const COLLISION_USE_EXTRA_TEST_POINTS = 1024;
 export const COLLISION_ITERATE_MOVEMENT = 2048;
+export const COLLISION_NOTICE_WHEN_INSIDE_COLLISION = 4096;
 export const COLLISION_HORIZONTAL_WORLD_EDGE_SOLID = 8192;
 export const COLLISION_VERTICAL_WORLD_EDGE_SOLID = 16384;
 
@@ -33,6 +34,57 @@ const NEITHER_CORNER = 0;
 const FIRST_CORNER = 1;
 const SECOND_CORNER = 2;
 
+// world_collision.cpp:1465-1467 - per-test-point collision outcomes. IGNORED means the
+// test point was ALREADY buried in solid material before the move started.
+const RESULT_COLLISION_OCCURRED = 0;
+const RESULT_COLLISION_IGNORED = 1;
+const RESULT_NO_COLLISION = 2;
+
+// world_collision.h:86
+const EXPOSURE_MAP_CARRY_ON = -1;
+
+// world_collision.cpp:104-140 block_covered_sides: which sides of each block shape are
+// flush with the edge of the block. Used when building the exposure profiles to resolve
+// edge pixels - "assume the neighbour continues the material" - so the profiles stay
+// purely block-local and never look at the real neighbouring tile.
+// Indexed [shape][DIRECTION_UP|RIGHT|DOWN|LEFT].
+const BLOCK_COVERED_SIDES: readonly (readonly number[])[] = [
+  [0, 0, 0, 0],
+  [1, 1, 1, 1],
+  [1, 1, 0, 0],
+  [1, 0, 0, 1],
+  [0, 1, 1, 0],
+  [0, 0, 1, 1],
+  [1, 1, 0, 0],
+  [1, 1, 0, 1],
+  [1, 1, 0, 1],
+  [1, 0, 1, 1],
+  [0, 1, 1, 0],
+  [0, 1, 1, 1],
+  [0, 1, 1, 1],
+  [0, 1, 0, 1],
+  [1, 1, 0, 0],
+  [1, 1, 1, 0],
+  [1, 1, 1, 0],
+  [0, 1, 1, 0],
+  [1, 0, 0, 1],
+  [1, 0, 1, 1],
+  [1, 0, 1, 1],
+  [0, 0, 1, 1],
+  [1, 0, 1, 1],
+  [1, 1, 1, 0],
+  [1, 1, 0, 1],
+  [0, 1, 1, 1],
+  [0, 1, 1, 0],
+  [0, 0, 1, 1],
+  [1, 1, 0, 0],
+  [1, 0, 0, 1],
+  [1, 0, 0, 1],
+  [1, 1, 0, 0],
+  [0, 0, 1, 1],
+  [0, 1, 1, 0]
+];
+
 let cachedBlockSize = 0;
 let blockDataSize = 0;
 let blockSidedDataSize = 0;
@@ -41,6 +93,7 @@ let blockSizeInverse = 0;
 let blockSizeBitshift = 0;
 let blockSolidProfiles = new Uint8Array(0);
 let blockDepthProfiles = new Int16Array(0);
+let blockExposureProfiles = new Int8Array(0);
 
 export interface WorldCollisionEntity {
   worldX: number;
@@ -165,6 +218,7 @@ function ensureBlockProfiles(blockSize: number): void {
   blockSizeBitshift = Math.log2(blockSize);
   blockSolidProfiles = new Uint8Array(BLOCK_PROFILE_COUNT * blockDataSize);
   blockDepthProfiles = new Int16Array(BLOCK_PROFILE_COUNT * blockSidedDataSize);
+  blockExposureProfiles = new Int8Array(BLOCK_PROFILE_COUNT * blockDataSize);
 
   for (let block = 0; block < BLOCK_PROFILE_COUNT; block++) {
     for (let x = 0; x < blockSize; x++) {
@@ -172,6 +226,59 @@ function ensureBlockProfiles(blockSize: number): void {
 
       for (let y = startY; y < endY; y++) {
         blockSolidProfiles[blockSolidIndex(block, x, y)] = 1;
+      }
+    }
+  }
+
+  // Faithful port of the block_exposure_profiles pass in WORLDCOLL_setup_block_collision
+  // (world_collision.cpp:918-1012). For each solid pixel the profile records which of the
+  // four faces are EXPOSED, derived entirely from the block's own solid profile; pixels on
+  // the block's edge fall back to the static block_covered_sides table rather than any
+  // neighbouring-tile lookup. Non-solid pixels get EXPOSURE_MAP_CARRY_ON.
+  for (let block = 0; block < BLOCK_PROFILE_COUNT; block++) {
+    const coveredSides = BLOCK_COVERED_SIDES[block];
+
+    for (let x = 0; x < blockSize; x++) {
+      for (let y = 0; y < blockSize; y++) {
+        let total = EXPOSURE_MAP_CARRY_ON;
+
+        if (blockSolidProfiles[blockSolidIndex(block, x, y)] === 1) {
+          total = DIRECTION_BITVALUE_TOTAL;
+
+          if (x > 0) {
+            if (blockSolidProfiles[blockSolidIndex(block, x - 1, y)]) {
+              total -= DIRECTION_BITVALUE_LEFT;
+            }
+          } else if (coveredSides[DIRECTION_LEFT]) {
+            total -= DIRECTION_BITVALUE_LEFT;
+          }
+
+          if (x < blockSize - 1) {
+            if (blockSolidProfiles[blockSolidIndex(block, x + 1, y)]) {
+              total -= DIRECTION_BITVALUE_RIGHT;
+            }
+          } else if (coveredSides[DIRECTION_RIGHT]) {
+            total -= DIRECTION_BITVALUE_RIGHT;
+          }
+
+          if (y > 0) {
+            if (blockSolidProfiles[blockSolidIndex(block, x, y - 1)]) {
+              total -= DIRECTION_BITVALUE_UP;
+            }
+          } else if (coveredSides[DIRECTION_UP]) {
+            total -= DIRECTION_BITVALUE_UP;
+          }
+
+          if (y < blockSize - 1) {
+            if (blockSolidProfiles[blockSolidIndex(block, x, y + 1)]) {
+              total -= DIRECTION_BITVALUE_DOWN;
+            }
+          } else if (coveredSides[DIRECTION_DOWN]) {
+            total -= DIRECTION_BITVALUE_DOWN;
+          }
+        }
+
+        blockExposureProfiles[blockSolidIndex(block, x, y)] = total;
       }
     }
   }
@@ -488,6 +595,67 @@ export default class WorldCollisionMap {
     return blockSolidProfiles[blockSolidIndex(blockNumber, localX, localY)];
   }
 
+  // Faithful port of C++ WORLDCOLL_collision_offset (world_collision.cpp:1366-1401).
+  //
+  // Returns EXPOSURE_MAP_CARRY_ON (-1) when the pixel is free (non-solid, or a tile the
+  // entity's collision bitmask doesn't interact with), otherwise the BLOCK-LOCAL bitmask
+  // of directions in which this pixel's face is exposed. Crucially this is not a
+  // neighbouring-tile lookup: block_exposure_profiles is built from the block's own solid
+  // profile with edge pixels resolved from block_covered_sides, so e.g. a pixel on the
+  // bottom edge of a full block (shape 1, covered sides {1,1,1,1}) has the DOWN bit
+  // cleared even when the tile below is empty.
+  //
+  // Out of bounds with the matching world-edge-solid flag short-circuits to 0
+  // (world_collision.cpp:1373-1383) - neither the carry-on sentinel nor an evade bit, so
+  // the caller treats the world edge as a dead end. Wizball sets both flags
+  // (wizball.txt:164-165).
+  private collisionOffset(
+    layer: number,
+    x: number,
+    y: number,
+    collisionBitmask: number,
+    worldEdgeHit: number
+  ): number {
+    if (
+      (worldEdgeHit & (COLLISION_HORIZONTAL_WORLD_EDGE_SOLID | COLLISION_VERTICAL_WORLD_EDGE_SOLID)) !== 0
+    ) {
+      if (
+        (worldEdgeHit & COLLISION_HORIZONTAL_WORLD_EDGE_SOLID) !== 0 &&
+        (x < 0 || x >= this.widthInPixels)
+      ) {
+        return 0;
+      }
+
+      if (
+        (worldEdgeHit & COLLISION_VERTICAL_WORLD_EDGE_SOLID) !== 0 &&
+        (y < 0 || y >= this.heightInPixels)
+      ) {
+        return 0;
+      }
+    }
+
+    const blockX = x >> blockSizeBitshift;
+    const blockY = y >> blockSizeBitshift;
+
+    // The C++ has no bounds check past the world-edge short-circuit (it relies on those
+    // flags being set); guard the array read here and treat an unguarded out-of-bounds
+    // pixel as free space.
+    if (blockX < 0 || blockX >= this.width || blockY < 0 || blockY >= this.height) {
+      return EXPOSURE_MAP_CARRY_ON;
+    }
+
+    const blockOffset = this.tileIndex(layer, blockX, blockY);
+
+    if ((collisionBitmask & this.collisionBitmaskData[blockOffset]) === 0) {
+      return EXPOSURE_MAP_CARRY_ON;
+    }
+
+    const blockNumber = this.collisionData[blockOffset];
+    const localX = x & blockSizeMinusOne;
+    const localY = y & blockSizeMinusOne;
+    return blockExposureProfiles[blockSolidIndex(blockNumber, localX, localY)];
+  }
+
   // Faithful port of C++ WORLDCOLL_push_entity_against_sliding_collision.
   //
   // After a primary push collided against a corner, this slides the entity
@@ -659,6 +827,9 @@ export default class WorldCollisionMap {
     const startY = y;
     const layer = entity.worldCollisionLayer;
     const collisionBitmask = entity.worldCollisionBitmask;
+    // world_collision.cpp:2458 passes the entity's whole collision behaviour as the
+    // world_edge_hit argument.
+    const worldEdgeHit = entity.worldCollisionBehaviour;
 
     for (let counter = 0; counter < distance; counter++) {
       const oldX = x;
@@ -667,20 +838,20 @@ export default class WorldCollisionMap {
       x += xAdder;
       y += yAdder;
 
-      // Equivalent of WORLDCOLL_collision_offset's 3-way branch:
-      //   non-solid pixel          -> carry on (EXPOSURE_MAP_CARRY_ON)
-      //   solid + evade side open  -> step the evade adder to climb out
-      //   solid + evade side solid -> dead-end, restore previous position
-      if (this.solidTest(layer, x, y, collisionBitmask) === 0) {
+      // WORLDCOLL_collision_offset's 3-way branch (world_collision.cpp:2458-2475):
+      //   EXPOSURE_MAP_CARRY_ON      -> free pixel, carry on
+      //   result & evade_bitvalue    -> exposed towards the evade side, climb out
+      //   otherwise (including 0 at  -> dead-end, restore previous position
+      //   a solid world edge)
+      // Note this uses the block-LOCAL exposure profile, not a neighbouring-tile solid
+      // test: the C++ never looks at the adjacent tile here, it assumes a covered side
+      // continues the material (see collisionOffset above). Order matters - CARRY_ON is
+      // -1, so it has every evade bit set and must be tested first.
+      const offsetResult = this.collisionOffset(layer, x, y, collisionBitmask, worldEdgeHit);
+
+      if (offsetResult === EXPOSURE_MAP_CARRY_ON) {
         // Carry on through free space.
-      } else if (
-        this.solidTest(
-          layer,
-          x + (evadeBitvalue === DIRECTION_BITVALUE_RIGHT ? 1 : evadeBitvalue === DIRECTION_BITVALUE_LEFT ? -1 : 0),
-          y + (evadeBitvalue === DIRECTION_BITVALUE_DOWN ? 1 : evadeBitvalue === DIRECTION_BITVALUE_UP ? -1 : 0),
-          collisionBitmask
-        ) === 0
-      ) {
+      } else if ((offsetResult & evadeBitvalue) !== 0) {
         // Exposed edge faces the evade direction: climb out of the collision.
         x += xEvadeAdder;
         y += yEvadeAdder;
@@ -723,6 +894,81 @@ export default class WorldCollisionMap {
     return { deltaX, deltaY, remainder };
   }
 
+  // Faithful port of the result aggregation shared by WORLDCOLL_push_entity_horizontal
+  // (world_collision.cpp:1761-1872) and WORLDCOLL_push_entity_vertical
+  // (world_collision.cpp:2136-2246).
+  //
+  // The key behaviour the port was missing: an IGNORED point (one that was already buried
+  // in solid material before the move) is STICKY and OVERRIDES an OCCURRED point unless
+  // COLLISION_NOTICE_WHEN_INSIDE_COLLISION (4096) is set - once any point reports IGNORED
+  // the whole push reports not_collided (world_collision.cpp:1866-1871 / 2242-2245) and the
+  // entity moves freely on that axis. That's the escape hatch that stops an embedded entity
+  // locking up, and Wizball deliberately leaves the flag unset (wizball.txt:158-165).
+  private resolvePushResult(
+    results: readonly number[],
+    depths: readonly number[],
+    velocity: number,
+    noticeWhenInside: boolean
+  ): PushResult {
+    let overallResult = RESULT_NO_COLLISION;
+
+    for (let counter = 0; counter < results.length; counter++) {
+      if (results[counter] === RESULT_COLLISION_OCCURRED) {
+        if (overallResult === RESULT_NO_COLLISION) {
+          overallResult = RESULT_COLLISION_OCCURRED;
+        }
+      } else if (results[counter] === RESULT_COLLISION_IGNORED) {
+        overallResult = noticeWhenInside ? RESULT_COLLISION_OCCURRED : RESULT_COLLISION_IGNORED;
+      }
+    }
+
+    if (overallResult !== RESULT_COLLISION_OCCURRED) {
+      return { depth: velocity, collided: false, whichCorner: NEITHER_CORNER };
+    }
+
+    // Pick the depth closest to the origin. When notice_when_inside is set we additionally
+    // skip depths on the far side of zero, because we may be inside collision already.
+    let actualCollisionDepth = velocity;
+    let closestResultIndex = -1;
+
+    for (let counter = 0; counter < depths.length; counter++) {
+      const depth = depths[counter];
+
+      if (velocity < 0) {
+        if (depth > actualCollisionDepth && (!noticeWhenInside || depth <= 0)) {
+          actualCollisionDepth = depth;
+          closestResultIndex = counter;
+        }
+      } else if (depth < actualCollisionDepth && (!noticeWhenInside || depth >= 0)) {
+        actualCollisionDepth = depth;
+        closestResultIndex = counter;
+      }
+    }
+
+    return {
+      depth: actualCollisionDepth,
+      collided: true,
+      whichCorner:
+        closestResultIndex === 0
+          ? FIRST_CORNER
+          : closestResultIndex === 1
+            ? SECOND_CORNER
+            : NEITHER_CORNER
+    };
+  }
+
+  // Safety bound for the depth walks below. A legitimate walk is monotonic and leaves the
+  // block it is in on every step, so it can never need more than a couple of passes along
+  // the axis. The C++ has no bound: if the walk runs off a world edge INTO the edge (e.g.
+  // DIRECTION_LEFT reaching x<0, which returns x-width and keeps going more negative,
+  // world_collision.cpp:1131-1174) it diverges. In C++ the int eventually wraps; in JS the
+  // coordinate becomes +/-Infinity and, if the block it aliases to is solid, the loop never
+  // terminates and the tab hangs. Tripping the bound returns the walk's current coordinate,
+  // which classifies exactly as the divergent case would have.
+  private get maxDepthWalkSteps(): number {
+    return ((this.width + this.height) * 2) + 16;
+  }
+
   private getTotalCollisionDepthHorizontal(
     direction: number,
     directionBitmask: number,
@@ -733,9 +979,14 @@ export default class WorldCollisionMap {
     worldEdgeHit: number
   ): number {
     let result = 0;
+    let steps = this.maxDepthWalkSteps;
 
     while ((result = this.collisionDepth(direction, directionBitmask, layer, x, y, collisionBitmask, worldEdgeHit)) !== 0) {
       x += result;
+
+      if (--steps <= 0) {
+        break;
+      }
     }
 
     return x;
@@ -751,9 +1002,14 @@ export default class WorldCollisionMap {
     worldEdgeHit: number
   ): number {
     let result = 0;
+    let steps = this.maxDepthWalkSteps;
 
     while ((result = this.collisionDepth(direction, directionBitmask, layer, x, y, collisionBitmask, worldEdgeHit)) !== 0) {
       y += result;
+
+      if (--steps <= 0) {
+        break;
+      }
     }
 
     return y;
@@ -796,8 +1052,8 @@ export default class WorldCollisionMap {
     const startX = xVelocity < 0
       ? entity.worldX - entity.upperWorldWidth
       : entity.worldX + entity.lowerWorldWidth;
-    let actualCollisionDepth = xVelocity;
-    let closestResultIndex = -1;
+    const pointResults: number[] = [];
+    const pointDepths: number[] = [];
 
     for (let counter = 0; counter < checkCoords.length; counter++) {
       let collisionEndCoord = this.getTotalCollisionDepthHorizontal(
@@ -845,44 +1101,35 @@ export default class WorldCollisionMap {
         }
       }
 
+      // Three outcomes, not two (world_collision.cpp:1665-1685 for x_vel<0 and
+      // 1735-1755 for x_vel>0). Ending up BEYOND the start point in the direction we
+      // came from means the test point was already embedded in solid material before the
+      // move, which the C++ classifies as RESULT_COLLISION_IGNORED, not a collision.
       let collisionDepth = xVelocity;
-      let collided = false;
+      let pointResult = RESULT_NO_COLLISION;
 
       if (xVelocity < 0) {
-        if (collisionEndCoord > startX + xVelocity && collisionEndCoord <= startX) {
+        if (collisionEndCoord > startX) {
+          pointResult = RESULT_COLLISION_IGNORED;
+        } else if (collisionEndCoord > startX + xVelocity && collisionEndCoord <= startX) {
           collisionDepth = collisionEndCoord - startX;
-          collided = true;
+          pointResult = RESULT_COLLISION_OCCURRED;
         }
+      } else if (collisionEndCoord < startX) {
+        pointResult = RESULT_COLLISION_IGNORED;
       } else if (collisionEndCoord < startX + xVelocity && collisionEndCoord >= startX) {
         collisionDepth = collisionEndCoord - startX;
-        collided = true;
+        pointResult = RESULT_COLLISION_OCCURRED;
       }
 
-      if (collided) {
-        if (
-          closestResultIndex === -1 ||
-          (xVelocity < 0 ? collisionDepth > actualCollisionDepth : collisionDepth < actualCollisionDepth)
-        ) {
-          actualCollisionDepth = collisionDepth;
-          closestResultIndex = counter;
-        }
-      }
+      pointResults.push(pointResult);
+      pointDepths.push(collisionDepth);
     }
 
-    if (closestResultIndex === -1) {
-      return { depth: xVelocity, collided: false, whichCorner: NEITHER_CORNER };
-    }
+    const noticeWhenInside =
+      (entity.worldCollisionBehaviour & COLLISION_NOTICE_WHEN_INSIDE_COLLISION) !== 0;
 
-    return {
-      depth: actualCollisionDepth,
-      collided: true,
-      whichCorner:
-        closestResultIndex === 0
-          ? FIRST_CORNER
-          : closestResultIndex === 1
-            ? SECOND_CORNER
-            : NEITHER_CORNER
-    };
+    return this.resolvePushResult(pointResults, pointDepths, xVelocity, noticeWhenInside);
   }
 
   private pushVertical(entity: WorldCollisionEntity, yVelocity: number): PushResult {
@@ -922,8 +1169,8 @@ export default class WorldCollisionMap {
     const startY = yVelocity < 0
       ? entity.worldY - entity.upperWorldHeight
       : entity.worldY + entity.lowerWorldHeight;
-    let actualCollisionDepth = yVelocity;
-    let closestResultIndex = -1;
+    const pointResults: number[] = [];
+    const pointDepths: number[] = [];
 
     for (let counter = 0; counter < checkCoords.length; counter++) {
       let collisionEndCoord = this.getTotalCollisionDepthVertical(
@@ -971,43 +1218,32 @@ export default class WorldCollisionMap {
         }
       }
 
+      // Three outcomes, not two (world_collision.cpp:2041-2061 for y_vel<0 and
+      // 2110-2130 for y_vel>0) - see the matching comment in pushHorizontal.
       let collisionDepth = yVelocity;
-      let collided = false;
+      let pointResult = RESULT_NO_COLLISION;
 
       if (yVelocity < 0) {
-        if (collisionEndCoord > startY + yVelocity && collisionEndCoord <= startY) {
+        if (collisionEndCoord > startY) {
+          pointResult = RESULT_COLLISION_IGNORED;
+        } else if (collisionEndCoord > startY + yVelocity && collisionEndCoord <= startY) {
           collisionDepth = collisionEndCoord - startY;
-          collided = true;
+          pointResult = RESULT_COLLISION_OCCURRED;
         }
+      } else if (collisionEndCoord < startY) {
+        pointResult = RESULT_COLLISION_IGNORED;
       } else if (collisionEndCoord < startY + yVelocity && collisionEndCoord >= startY) {
         collisionDepth = collisionEndCoord - startY;
-        collided = true;
+        pointResult = RESULT_COLLISION_OCCURRED;
       }
 
-      if (collided) {
-        if (
-          closestResultIndex === -1 ||
-          (yVelocity < 0 ? collisionDepth > actualCollisionDepth : collisionDepth < actualCollisionDepth)
-        ) {
-          actualCollisionDepth = collisionDepth;
-          closestResultIndex = counter;
-        }
-      }
+      pointResults.push(pointResult);
+      pointDepths.push(collisionDepth);
     }
 
-    if (closestResultIndex === -1) {
-      return { depth: yVelocity, collided: false, whichCorner: NEITHER_CORNER };
-    }
+    const noticeWhenInside =
+      (entity.worldCollisionBehaviour & COLLISION_NOTICE_WHEN_INSIDE_COLLISION) !== 0;
 
-    return {
-      depth: actualCollisionDepth,
-      collided: true,
-      whichCorner:
-        closestResultIndex === 0
-          ? FIRST_CORNER
-          : closestResultIndex === 1
-            ? SECOND_CORNER
-            : NEITHER_CORNER
-    };
+    return this.resolvePushResult(pointResults, pointDepths, yVelocity, noticeWhenInside);
   }
 }

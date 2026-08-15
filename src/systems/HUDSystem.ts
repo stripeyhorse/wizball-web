@@ -19,6 +19,18 @@ export interface HUDState {
 const LIFE_ICON_BASE_FRAME = 74;
 const LIFE_ICON_MAX_FRAME = 91;
 
+// C++ constant.txt:511 — "9999999 MAXIMUM_POSSIBLE_SCORE". Every scoring site
+// in the scripts clamps with `!> MAXIMUM_POSSIBLE_SCORE` (e.g.
+// scripts/generic_level_enemy.txt:611, scripts/bonus_pearl.txt:148), so the
+// score can never exceed 7 digits in the original. Clamp on display too, so an
+// out-of-range value can't overflow the padded field.
+const MAXIMUM_POSSIBLE_SCORE = 9999999;
+
+const displayScore = (value: number): string =>
+  Math.min(Math.max(0, Math.floor(value) || 0), MAXIMUM_POSSIBLE_SCORE)
+    .toString()
+    .padStart(7, '0');
+
 // Original Amiga layout: a TOP status bar (scores + the weapon-icon panel) and a
 // BOTTOM status bar (lives, cauldrons, OCEAN box, level box, paint), with the
 // playfield between them. The weapon-icon panel is drawn by
@@ -98,8 +110,8 @@ export default class HUDSystem {
   }
 
   public update(): void {
-    this.scoreText.setText(this.state.score.toString().padStart(7, '0'));
-    this.hiScoreText.setText(`HI ${this.state.hiScore.toString().padStart(7, '0')}`);
+    this.scoreText.setText(displayScore(this.state.score));
+    this.hiScoreText.setText(`HI ${displayScore(this.state.hiScore)}`);
 
     const lives = Math.max(0, this.state.lives);
     this.lifeIcon.setFrame(Math.min(LIFE_ICON_BASE_FRAME + lives, LIFE_ICON_MAX_FRAME));

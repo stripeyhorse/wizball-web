@@ -1,85 +1,66 @@
-# Wizball - Phaser 3 Remake
+# Wizball
 
-A complete TypeScript + Phaser 3 remake of the classic Amiga game Wizball.
+A browser port of **Wizball** (Ocean / Sensible Software, 1987), built on Phaser 3 and
+TypeScript.
 
-## Project Structure
+It is a port of the C++ Retrospec remake that lives at `../wizball-remake/wizball`. That
+project's behaviour scripts and datatables are the spec for this one — when the two
+disagree, the C++ is right. Code here cites the C++ source in comments (file and line) at
+every point where behaviour was transcribed.
+
+## Running it
+
+Requires [Bun](https://bun.sh).
+
+```bash
+bun install
+bun run dev      # Vite dev server
+bun run build    # tsc --noEmit-style typecheck, then a production build into dist/
+bun run preview  # serve the production build
+```
+
+The build uses a relative base path, so `dist/` can be dropped on any static host or
+opened from a subdirectory.
+
+## Layout
 
 ```
+index.html          Page shell: canvas host, on-screen touch controls, rotate prompt
 src/
-├── entities/       # Game entities (Wizball, Catellite, PaintDrop)
-├── managers/       # Game systems (RoomManager)
-├── scenes/         # Phaser scenes (Boot, Preload, Game)
-├── types/          # TypeScript interfaces and enums
-└── main.ts         # Entry point
+├── main.ts         Phaser game config, audio mixer wiring, FPS readout, CRT pipeline
+├── config/         Settings singleton (localStorage-backed), defaults, draw-order depths
+├── data/           Transcribed datatables: levels, waves, paths, cauldron targets
+├── scenes/         Boot, Preload, Intro, Title, GetReady, Game, Laboratory,
+│                   BonusLevel, GameOver, GameComplete, Settings, Pause
+├── systems/        Gameplay systems: enemies, collision, tilemap/atlas parsing, warp
+│                   tubes, cauldron, HUD, hi-scores, input, music, CRT shader
+└── types/          Shared enums, scene keys, settings schema
+public/assets/      Sprites, tilemaps, audio (WAV effects, MP3 music)
 ```
 
-## Implemented Features
-
-### Core Mechanics
-- **Wizball**: Main player character with physics-based movement and ball physics
-  - Three movement modes: Basic Bounce, Controlled Bounce, Full Control
-  - Weapon system with power-ups
-  - Bouncing off walls with realistic physics
-
-- **Catellite**: Companion orb that follows Wizball
-  - Follows behind player horizontally
-  - Controlled shooting when player holds fire
-  - Independent movement system
-  - Health system
-
-- **Paint System**: Collect paint drops to paint walls
-  - Four colors: Red, Green, Blue, Yellow
-  - Paint drops fall from ceiling
-  - Catellite collects drops to paint walls
-  - Visual paint splatter on walls
-
-- **Room System**: Multi-room level structure
-  - Room boundaries with collision
-  - Room transitions via exits
-  - Spawn points for each room
+There is no entity-per-file layer: `GameScene` owns the ball, Catellite, bullets and
+paint, and the `systems/` modules operate on that state. This mirrors how the C++ scripts
+are organised.
 
 ## Controls
 
-- **Arrow Keys**: Move Wizball/Catellite
-- **Space**: Fire (Wizball) / Control Catellite
+| Action | Keyboard | Gamepad | Touch |
+|---|---|---|---|
+| Move | Arrow keys | Left stick / D-pad | On-screen D-pad |
+| Fire | Space | A / Cross | FIRE |
+| Alt fire, bonus select | Z | X / Square | Z |
+| Pause | Esc | Start | Pause button |
 
-## Development
+Everything is rebindable in Settings → Controls. Settings also has volume and mute,
+a CRT filter, and a manual override for whether the touch overlay is shown.
 
-```bash
-# Install dependencies
-npm install
+## Reference material
 
-# Development server
-npm run dev
+The C++ remake is the source of truth:
 
-# Build for production
-npm run build
+- `wizball/wizball/scripts/*.txt` — per-entity behaviour (the real spec)
+- `wizball/wizball/datatables/` — wave, path and level tables
+- `wizball/wizball/constant.txt` — tuning constants and draw orders
+- `wizball/wizball/sprites/*.txt` — sprite atlas definitions
 
-# Preview production build
-npm run preview
-```
-
-## Tech Stack
-
-- **Phaser 3.90**: Game framework
-- **TypeScript**: Type-safe development
-- **Vite**: Fast build tool and dev server
-- **Matter.js**: 2D physics engine
-
-## Future Enhancements
-
-- Enemy AI (droids, balls, snakes)
-- Power-up system implementation
-- Warp zone functionality
-- Sound effects and music
-- More complex level design
-- Score system
-- Multiple weapon types
-
-## Original Study
-
-Based on study of the original C++ source code at `../wizzball-remake/wizball/`:
-- Ball physics from `wizball.txt` script
-- Catellite behavior from `catellite.txt` script  
-- Paint system from `paintdrop.txt` script
-- Original movement patterns and collision detection
+`PARITY_PLAN.md` tracks how far the port has got against it.

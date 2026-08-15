@@ -15,6 +15,22 @@ interface LevelCauldronColors {
   blue: { r: number; g: number; b: number };
 }
 
+// The pot furniture (body / rim / handles) never changes once built — only the
+// liquid column and its glow do. Keeping references to those two lets us redraw
+// a couple of rects per change instead of destroying and re-tessellating four
+// containers' worth of rounded rects and circles every frame.
+interface CauldronView {
+  container: Phaser.GameObjects.Container;
+  liquid: Phaser.GameObjects.Graphics;
+  glow: Phaser.GameObjects.Ellipse;
+}
+
+// Pot geometry (unchanged from the original per-frame renderer).
+const BODY_W = 40;
+const BODY_H = 30;
+const LIQUID_MAX_H = BODY_H - 10; // leave room for the rim
+const LIQUID_W = BODY_W - 8;
+
 export default class CauldronSystem {
   private scene: Phaser.Scene;
   private cauldrons: Cauldron[] = [
@@ -46,7 +62,11 @@ export default class CauldronSystem {
   private currentLevel: number = 1;
   private currentStage: number = 0; // C++ level_progress (0..2) — which colour target is active
   private currentLevelCauldronColors: LevelCauldronColors;
-  private cauldronSprites: Phaser.GameObjects.Container[] = [];
+  private views: CauldronView[] = [];
+  // Last drawn fill ratio / colour per cauldron, so an unchanged frame costs
+  // nothing at all. -1 forces the first draw.
+  private lastRatio: number[] = [-1, -1, -1, -1];
+  private lastColorInt: number[] = [-1, -1, -1, -1];
 
   constructor(scene: Phaser.Scene) {
     this.scene = scene;
@@ -62,7 +82,10 @@ export default class CauldronSystem {
     this.currentStage = stage;
     this.loadCauldronColors(level);
     this.positionCauldrons();
-    this.renderCauldrons();
+    this.buildCauldrons();
+    // Level/stage change repaints the combination cauldron's colour, so force
+    // a redraw rather than relying on the fill-level change detector.
+    this.refreshFills(true);
   }
 
   private loadCauldronColors(level: number): void {
@@ -141,65 +164,91 @@ export default class CauldronSystem {
     this.cauldrons[3].position = { x: 232, y };  // Combination (slightly detached)
   }
 
-  private renderCauldrons(): void {
-    this.cauldronSprites.forEach(s => s.destroy());
-    this.cauldronSprites = [];
+  /** Build the static pot furniture once; later calls only reposition it. */
+  private buildCauldrons(): void {
+    if (this.views.length > 0) {
+      this.views.forEach((view, i) => {
+        view.container.setPosition(this.cauldrons[i].position.x, this.cauldrons[i].position.y);
+      });
+      return;
+    }
 
     this.cauldrons.forEach((cauldron) => {
       const container = this.scene.add.container(cauldron.position.x, cauldron.position.y);
 
-      const color = this.getCauldronRGB(cauldron.color);
-      const colorInt = (color.r << 16) | (color.g << 8) | color.b;
-
       // Cauldron body (dark iron pot) - tall rounded shape, 40w x 30h
-      const bodyW = 40;
-      const bodyH = 30;
       const body = this.scene.add.graphics();
       body.fillStyle(0x1a1a22, 1);
-      body.fillRoundedRect(-bodyW / 2, -bodyH / 2 + 4, bodyW, bodyH, { tl: 6, tr: 6, bl: 12, br: 12 });
+      body.fillRoundedRect(-BODY_W / 2, -BODY_H / 2 + 4, BODY_W, BODY_H, { tl: 6, tr: 6, bl: 12, br: 12 });
       body.lineStyle(2, 0x44444c, 1);
-      body.strokeRoundedRect(-bodyW / 2, -bodyH / 2 + 4, bodyW, bodyH, { tl: 6, tr: 6, bl: 12, br: 12 });
+      body.strokeRoundedRect(-BODY_W / 2, -BODY_H / 2 + 4, BODY_W, BODY_H, { tl: 6, tr: 6, bl: 12, br: 12 });
 
-      // Liquid fill from bottom up (vertical fill)
-      const fillRatio = Math.min(1, cauldron.fillLevel / cauldron.maxCapacity);
-      const liquidMaxH = bodyH - 10; // leave room for rim
-      const liquidH = liquidMaxH * fillRatio;
-      const liquidW = bodyW - 8;
-      if (liquidH > 0) {
-        const liquid = this.scene.add.graphics();
-        liquid.fillStyle(colorInt, 0.9);
-        liquid.fillRect(-liquidW / 2, bodyH / 2 - 2 - liquidH, liquidW, liquidH);
-        // Surface highlight
-        liquid.fillStyle(0xffffff, 0.25);
-        liquid.fillRect(-liquidW / 2, bodyH / 2 - 2 - liquidH, liquidW, 2);
-        container.add(liquid);
-      }
+      // Liquid fill from bottom up (vertical fill) — redrawn in refreshFills().
+      const liquid = this.scene.add.graphics();
+
+      // Glow (colour aura when filled) — recoloured in refreshFills().
+      const glow = this.scene.add.ellipse(0, -BODY_H / 2 + 2, BODY_W + 8, 6, 0xffffff, 0);
+      glow.setVisible(false);
 
       // Rim
       const rim = this.scene.add.graphics();
       rim.fillStyle(0x686874, 1);
-      rim.fillRect(-bodyW / 2 - 3, -bodyH / 2 + 2, bodyW + 6, 4);
+      rim.fillRect(-BODY_W / 2 - 3, -BODY_H / 2 + 2, BODY_W + 6, 4);
       rim.lineStyle(1, 0x2a2a30, 1);
-      rim.strokeRect(-bodyW / 2 - 3, -bodyH / 2 + 2, bodyW + 6, 4);
+      rim.strokeRect(-BODY_W / 2 - 3, -BODY_H / 2 + 2, BODY_W + 6, 4);
 
       // Side handles
       const handles = this.scene.add.graphics();
       handles.lineStyle(2, 0x686874, 1);
-      handles.strokeCircle(-bodyW / 2 - 4, -bodyH / 2 + 4, 3);
-      handles.strokeCircle(bodyW / 2 + 4, -bodyH / 2 + 4, 3);
+      handles.strokeCircle(-BODY_W / 2 - 4, -BODY_H / 2 + 4, 3);
+      handles.strokeCircle(BODY_W / 2 + 4, -BODY_H / 2 + 4, 3);
 
-      // Glow (colour aura when filled)
-      if (fillRatio > 0) {
-        const glow = this.scene.add.ellipse(0, -bodyH / 2 + 2, bodyW + 8, 6, colorInt, 0.35 * fillRatio);
-        container.add(glow);
-      }
-
-      container.add([body, rim, handles]);
-      // Re-order so rim stays above liquid
+      // Draw order: pot, then the liquid *inside* it, then the glow, then the
+      // rim/handles on top. (Previously the opaque body was added last, so it
+      // covered the liquid and the glow entirely — the pots could never show a
+      // fill level at all.)
+      container.add([body, liquid, glow, rim, handles]);
       container.setDepth(100);
       container.setScrollFactor(0);
 
-      this.cauldronSprites.push(container);
+      this.views.push({ container, liquid, glow });
+    });
+  }
+
+  /** Redraw only the cauldrons whose fill ratio or colour actually changed. */
+  private refreshFills(force: boolean = false): void {
+    this.cauldrons.forEach((cauldron, i) => {
+      const view = this.views[i];
+      if (!view) return;
+
+      const color = this.getCauldronRGB(cauldron.color);
+      const colorInt = (color.r << 16) | (color.g << 8) | color.b;
+      const capacity = Math.max(1, cauldron.maxCapacity);
+      const raw = cauldron.fillLevel / capacity;
+      // A NaN ratio would never compare equal to the cached one, so it would
+      // force a redraw every single frame — exactly what this is avoiding.
+      const fillRatio = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0;
+
+      if (!force && fillRatio === this.lastRatio[i] && colorInt === this.lastColorInt[i]) return;
+      this.lastRatio[i] = fillRatio;
+      this.lastColorInt[i] = colorInt;
+
+      const liquidH = LIQUID_MAX_H * fillRatio;
+      view.liquid.clear();
+      if (liquidH > 0) {
+        view.liquid.fillStyle(colorInt, 0.9);
+        view.liquid.fillRect(-LIQUID_W / 2, BODY_H / 2 - 2 - liquidH, LIQUID_W, liquidH);
+        // Surface highlight
+        view.liquid.fillStyle(0xffffff, 0.25);
+        view.liquid.fillRect(-LIQUID_W / 2, BODY_H / 2 - 2 - liquidH, LIQUID_W, 2);
+      }
+
+      if (fillRatio > 0) {
+        view.glow.setFillStyle(colorInt, 0.35 * fillRatio);
+        view.glow.setVisible(true);
+      } else {
+        view.glow.setVisible(false);
+      }
     });
   }
 
@@ -244,11 +293,15 @@ export default class CauldronSystem {
     // it fills as you approach the goal and is full exactly when the stage clears.
     this.cauldrons[3].maxCapacity = Math.max(1, needed);
     this.cauldrons[3].fillLevel = contributed;
-    this.renderCauldrons();
+    // GameScene.updateHUD() calls this every frame; refreshFills() no-ops when
+    // nothing moved instead of rebuilding ~20 GameObjects per frame.
+    this.refreshFills();
   }
 
   destroy(): void {
-    this.cauldronSprites.forEach(sprite => sprite.destroy());
-    this.cauldronSprites = [];
+    this.views.forEach(view => view.container.destroy());
+    this.views = [];
+    this.lastRatio = [-1, -1, -1, -1];
+    this.lastColorInt = [-1, -1, -1, -1];
   }
 }

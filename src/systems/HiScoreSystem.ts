@@ -19,7 +19,7 @@ export default class HiScoreSystem {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
-        this.scores = JSON.parse(stored);
+        this.scores = HiScoreSystem.sanitise(JSON.parse(stored));
       }
     } catch {
       this.scores = this.getDefaultScores();
@@ -28,6 +28,27 @@ export default class HiScoreSystem {
     if (this.scores.length === 0) {
       this.scores = this.getDefaultScores();
     }
+  }
+
+  // localStorage is user-writable and survives across builds, so the stored
+  // blob can be anything. Previously a non-array value (e.g. `{}` or `7`)
+  // passed the `length === 0` guard untouched and then blew up in getScores()
+  // when it was spread — which killed the title screen outright. Keep only
+  // well-formed entries and fall back to the defaults if nothing survives.
+  private static sanitise(parsed: unknown): HiScoreEntry[] {
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .filter((e): e is Record<string, unknown> => typeof e === 'object' && e !== null)
+      .filter(e => typeof e.name === 'string' && Number.isFinite(e.score) && Number.isFinite(e.level))
+      .map(e => ({
+        name: String(e.name).toUpperCase().substring(0, 13), // C++ HISCORE_MAX_NAME_LENGTH = 13
+        score: Math.max(0, Math.floor(e.score as number)),
+        level: Math.max(1, Math.floor(e.level as number)),
+        date: typeof e.date === 'string' ? e.date : '2024-01-01'
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, MAX_SCORES);
   }
 
   save(): void {

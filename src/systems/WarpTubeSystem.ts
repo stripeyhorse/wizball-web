@@ -32,7 +32,9 @@ const WIZBALL_FRAME_COUNT = 64;
 export default class WarpTubeSystem {
   private scene: Phaser.Scene;
   private warpTubes: Map<string, Phaser.GameObjects.Rectangle> = new Map();
-  private warpParticles: Phaser.GameObjects.Particles.ParticleEmitter[] = [];
+  // Keyed the same way as warpTubes so a re-added zone replaces its emitter
+  // instead of stacking a second one on the same spot.
+  private warpParticles: Map<string, Phaser.GameObjects.Particles.ParticleEmitter> = new Map();
   private isWarping: boolean = false;
   private warpTimer: number = 0;
 
@@ -68,6 +70,13 @@ export default class WarpTubeSystem {
   public addWarpTube(data: WarpTubeData): void {
     const key = `${data.x},${data.y}`;
 
+    // Two zones can share a key (same x,y) if a level is rebuilt without a
+    // clear(), or if the level data lists a duplicate. The Map.set() below
+    // would then orphan the previous Rectangle — still on the display list,
+    // never destroyed — and createWarpParticles() would stack a second
+    // emitter on top of the first. Drop the old pair first.
+    this.removeWarpTube(key);
+
     // Create warp tube marker. The C++ warp zones are invisible editor icons
     // (warp_zone_up/down.txt have no draw mode); the original only renders the
     // tube graphic that drops in on arrival. We keep a *subtle* shimmer so the
@@ -90,10 +99,24 @@ export default class WarpTubeSystem {
     this.warpTubes.set(key, warpTube);
 
     // Create particle effect
-    this.createWarpParticles(data);
+    this.createWarpParticles(key, data);
   }
 
-  private createWarpParticles(data: WarpTubeData): void {
+  private removeWarpTube(key: string): void {
+    const existing = this.warpTubes.get(key);
+    if (existing) {
+      existing.destroy();
+      this.warpTubes.delete(key);
+    }
+
+    const emitter = this.warpParticles.get(key);
+    if (emitter) {
+      emitter.destroy();
+      this.warpParticles.delete(key);
+    }
+  }
+
+  private createWarpParticles(key: string, data: WarpTubeData): void {
     const color = data.direction === 'up' ? 0x44aaff : 0xff44aa;
     const emitter = this.scene.add.particles(data.x, data.y, 'wt_particle', {
       speed: { min: 12, max: 28 },
@@ -106,7 +129,7 @@ export default class WarpTubeSystem {
     });
     emitter.setDepth(14);
 
-    this.warpParticles.push(emitter);
+    this.warpParticles.set(key, emitter);
   }
 
   /** True while a warp-out sequence is in progress (C++ getting_sucked_into_a_hole_flag).
@@ -352,10 +375,9 @@ export default class WarpTubeSystem {
     }
 
     // Animate warp tube markers (subtle shimmer — range ~0.06..0.22).
-    this.warpTubes.forEach(warpTube => {
-      const pulse = Math.sin(Date.now() / 600) * 0.08 + 0.14;
-      warpTube.setAlpha(pulse);
-    });
+    // One sin() per frame, not one per tube: the value is the same for all.
+    const pulse = Math.sin(Date.now() / 600) * 0.08 + 0.14;
+    this.warpTubes.forEach(warpTube => warpTube.setAlpha(pulse));
   }
 
   private endWarp(): void {
@@ -371,7 +393,7 @@ export default class WarpTubeSystem {
     this.warpTubes.forEach(warpTube => warpTube.destroy());
     this.warpTubes.clear();
     this.warpParticles.forEach(emitter => emitter.destroy());
-    this.warpParticles = [];
+    this.warpParticles.clear();
   }
 
   public resetWarping(): void {

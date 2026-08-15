@@ -9,6 +9,7 @@ export class InputManager {
   private pad: Phaser.Input.Gamepad.Gamepad | null = null;
   private prevButtonState: Map<number, boolean> = new Map();
   private prevTouch: Partial<Record<ActionName, boolean>> = {};
+  private destroyed = false;
 
   constructor(scene: Phaser.Scene) {
     this.scene = scene;
@@ -130,7 +131,12 @@ export class InputManager {
   }
 
   destroy(): void {
-    if (this.keys.size === 0) return; // Already destroyed
+    // Guard on an explicit flag, not on keys.size: buildKeys() binds nothing
+    // when every action is unbound (or the scene has no keyboard plugin), and
+    // the old `keys.size === 0` check then skipped the listener removal below —
+    // leaking a game-level 'settings:changed' listener per GameScene create().
+    if (this.destroyed) return;
+    this.destroyed = true;
     this.scene.game.events.off('settings:changed', this.rebuildKeys, this);
     const keyboard = this.scene.input.keyboard;
     if (keyboard) {

@@ -13,6 +13,7 @@ export default class TitleScene extends Phaser.Scene {
   private showingScores = false;
   private started = false;
   private firePrev = false;
+  private settingsOpen = false;
   private hiScoreSystem!: HiScoreSystem;
 
   constructor() {
@@ -26,6 +27,16 @@ export default class TitleScene extends Phaser.Scene {
     this.showingScores = false;
     this.started = false;
     this.firePrev = false;
+    this.settingsOpen = false;
+    // The previous visit's logos were destroyed with that scene instance; without
+    // this, every return to the Title appended four more and update() called
+    // setVisible() on destroyed objects.
+    this.creditLogos = [];
+    this.settingsOpen = false;
+    // Everything from the previous visit was destroyed on shutdown; drop the
+    // stale references too, or each return to the Title appends four more and
+    // update() calls setVisible() on destroyed game objects.
+    this.creditLogos = [];
 
     // Black backdrop (pillarbox bars), then the original Amiga title art
     // (Ocean / Sensible Software, 1987), scaled to fit preserving aspect.
@@ -52,10 +63,14 @@ export default class TitleScene extends Phaser.Scene {
       backgroundColor: '#000000cc', padding: { x: 12, y: 6 },
     }).setOrigin(0.5).setDepth(10);
 
-    this.add.text(636, 410, 'S: Settings', {
-      fontSize: '11px', color: '#aaaaaa', fontFamily: 'monospace',
-      backgroundColor: '#000000aa', padding: { x: 4, y: 2 },
+    // A real button, not just a key hint: on touch the S key does not exist, and
+    // this is the only route into the Settings menu before a game has started.
+    const settingsButton = this.add.text(632, 408, '[ SETTINGS ]', {
+      fontSize: '13px', color: '#aaddff', fontFamily: 'monospace',
+      backgroundColor: '#000000cc', padding: { x: 10, y: 8 },
     }).setOrigin(1, 1).setDepth(10);
+    settingsButton.setInteractive({ useHandCursor: true });
+    settingsButton.on('pointerdown', this.openSettings, this);
 
     this.input.keyboard!.removeCapture(Phaser.Input.Keyboard.KeyCodes.SPACE);
     const spaceKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE, true);
@@ -64,7 +79,7 @@ export default class TitleScene extends Phaser.Scene {
     settingsKey.on('down', this.openSettings, this);
 
     // Touch / mouse: tap anywhere (off the on-screen buttons) to start.
-    this.input.on('pointerdown', this.startGame, this);
+    this.input.on('pointerdown', this.onPointerDown, this);
 
     if (this.cache.audio.exists('menu_select')) {
       this.sound.add('menu_select');
@@ -129,12 +144,44 @@ export default class TitleScene extends Phaser.Scene {
     this.scene.start('GetReady', { level: 1 });
   }
 
+  // Tap-anywhere-to-start, minus the taps that landed on a button of our own
+  // (the Settings button). Phaser still emits the scene-level pointerdown when
+  // the press hits an interactive object, so it has to be filtered here.
+  private onPointerDown(pointer: Phaser.Input.Pointer): void {
+    if (this.input.hitTestPointer(pointer).length > 0) return;
+    this.startGame();
+  }
+
   private openSettings(): void {
+    if (this.scene.isActive(SETTINGS)) return; // already up — don't restart it
+    this.setSuspended(true);
     this.scene.launch(SETTINGS, { returnTo: 'Title' });
     this.scene.bringToTop(SETTINGS);
   }
 
+  // Settings is launched in *parallel*, so without this the Title still holds a
+  // scene-wide pointerdown->startGame and a captured SPACE: clicking anywhere in
+  // the Settings overlay, or pressing SPACE, started a real game underneath it.
+  // Derived from whether Settings is actually running (see update()) so no exit
+  // path can leave the Title with its input switched off.
+  private setSuspended(suspended: boolean): void {
+    this.settingsOpen = suspended;
+    this.input.enabled = !suspended;
+    if (this.input.keyboard) this.input.keyboard.enabled = !suspended;
+  }
+
   update(): void {
+    const settingsActive = this.scene.isActive(SETTINGS);
+    if (settingsActive !== this.settingsOpen) {
+      this.setSuspended(settingsActive);
+    }
+    if (settingsActive) {
+      // Swallow the overlay's touches so releasing FIRE over Settings doesn't
+      // register as an edge the moment it closes.
+      this.firePrev = !!(window as unknown as { __wizTouch?: Record<string, boolean> }).__wizTouch?.fire;
+      return;
+    }
+
     // On-screen FIRE button (mobile) also starts the game.
     const fire = !!(window as unknown as { __wizTouch?: Record<string, boolean> }).__wizTouch?.fire;
     if (fire && !this.firePrev) this.startGame();

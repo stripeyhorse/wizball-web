@@ -164,20 +164,13 @@ export default class PreloadScene extends Phaser.Scene {
       this.load.audio(sound, `assets/${sound}.wav`);
     }
 
-    // Music (C++ streams/*.mp3)
-    const musicFiles = [
-      'wizball_title',
-      'wizball_in_game',
-      'wizball_laboratory',
-      'wizball_bonus',
-      'wizball_pre_life',
-      'wizball_completion',
-      'wizball_game_over',
-      'wizball_hi_score',
-    ];
-    for (const music of musicFiles) {
-      this.load.audio(music, `assets/${music}.mp3`);
-    }
+    // Music (C++ streams/*.mp3) is deliberately NOT loaded here. Phaser 3.90
+    // decodes every this.load.audio() file into a resident float32 AudioBuffer
+    // (loader/filetypes/AudioFile.js onProcess -> decodeAudioData): the eight
+    // music MP3s came to ~346 MB of RAM against 22 MB of textures, and their
+    // 17.9 MB of download was most of the 28.7 MB that had to arrive before the
+    // title screen. MusicManager streams them from a plain <audio> element
+    // on demand instead — see src/systems/MusicManager.ts.
   }
 
   create(): void {

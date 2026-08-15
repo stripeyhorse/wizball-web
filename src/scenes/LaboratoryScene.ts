@@ -13,6 +13,12 @@ export default class LaboratoryScene extends Phaser.Scene {
   private level: number = 1;
   private score: number = 0;
   private weaponCollection: number = 0;
+  // C++ wizball_starting_loadout — the PERMANENT loadout, written only here
+  // (lab_manage_permanent_upgrade_icons.txt:170) and read on every new life
+  // (wizball.txt:178). Distinct from the in-level loadout (wizball_current_loadout,
+  // = this.weaponCollection). Optional in the scene payload: GameScene may not
+  // carry it yet, in which case the in-level collection stands in for it.
+  private startingLoadout: number = 0;
   private lives: number = 2;
   private levelProgress: number = 3; // 3 => the level's last stage just finished
   private cauldronFill: number[] = [0, 0, 0, 0];
@@ -24,6 +30,11 @@ export default class LaboratoryScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private fireKey!: Phaser.Input.Keyboard.Key;
   private complete: boolean = false;
+  // C++ lab_manage_permanent_upgrade_icons.txt:104-108 gates FIRE on
+  // effect_fullness reaching target_effect_fullness. That ramps 0 → 10000 at
+  // effect_fullness_adaption_rate (200) per frame (:19,:23-24,:190-194), i.e.
+  // 50 frames while the icon ring fades in.
+  private fireLockFrames: number = 50;
   private tLeft = false;
   private tRight = false;
   private tFire = false;
@@ -34,11 +45,14 @@ export default class LaboratoryScene extends Phaser.Scene {
 
   init(data: {
     level: number; score?: number; weaponCollection?: number; lives?: number;
-    levelProgress?: number; cauldronFill?: number[];
+    levelProgress?: number; cauldronFill?: number[]; startingLoadout?: number;
   }): void {
     this.level = data.level || 1;
     this.score = data.score || 0;
     this.weaponCollection = data.weaponCollection || 0;
+    // Fall back to the in-level collection when the payload has no permanent
+    // loadout yet, so the icon list is never wrong either way.
+    this.startingLoadout = data.startingLoadout ?? this.weaponCollection;
     this.lives = data.lives ?? 2;
     this.levelProgress = data.levelProgress ?? 3;
     this.cauldronFill = data.cauldronFill ? [...data.cauldronFill] : [0, 0, 0, 0];
@@ -50,6 +64,7 @@ export default class LaboratoryScene extends Phaser.Scene {
     // true after the first visit, so update() bailed on frame one and the second
     // laboratory accepted no input at all: an unrecoverable softlock.
     this.complete = false;
+    this.fireLockFrames = 50;
     this.selectedIndex = 0;
     this.options = [];
     this.icons = [];
@@ -101,45 +116,46 @@ export default class LaboratoryScene extends Phaser.Scene {
     this.createIcons();
     this.updateSelection();
 
-    if (this.cache.audio.exists('menu_selector_move')) {
-      this.sound.add('menu_selector_move', { volume: 0.5 });
-    }
-    if (this.cache.audio.exists('permanent_upgrade_selected')) {
-      this.sound.add('permanent_upgrade_selected', { volume: 0.6 });
-    }
-
+    // (No sound.add() pre-warming here: playback below goes through
+    // this.sound.play(), which self-cleans. The two Sound objects this used to
+    // create were never played and were never destroyed — one pair leaked per
+    // laboratory visit.)
     playSceneMusic(this, 'wizball_laboratory');
   }
 
+  // C++ lab_manage_permanent_upgrade_icons.txt:28-81 — the icon list is built
+  // from wizball_starting_loadout, not from the in-level collection.
   private buildOptions(): UpgradeOption[] {
     const options: UpgradeOption[] = [];
+    const loadout = this.startingLoadout;
 
-    if (!(this.weaponCollection & WeaponFlag.LATERAL_CONTROL)) {
+    if (!(loadout & WeaponFlag.LATERAL_CONTROL)) {
       options.push({ frame: 'panel_icons_11', flag: WeaponFlag.LATERAL_CONTROL, label: 'CONTROL LEFT / RIGHT' });
-    } else if (!(this.weaponCollection & WeaponFlag.VERTICAL_CONTROL)) {
+    } else if (!(loadout & WeaponFlag.VERTICAL_CONTROL)) {
       options.push({ frame: 'panel_icons_12', flag: WeaponFlag.VERTICAL_CONTROL, label: 'FULL CONTROL' });
     }
 
-    if (!(this.weaponCollection & WeaponFlag.SHIELD_FIRE)) {
+    if (!(loadout & WeaponFlag.SHIELD_FIRE)) {
       options.push({ frame: 'panel_icons_13', flag: WeaponFlag.SHIELD_FIRE, label: 'SHIELD FIRE' });
-    } else if (!(this.weaponCollection & WeaponFlag.REAR_FIRE)) {
+    } else if (!(loadout & WeaponFlag.REAR_FIRE)) {
       options.push({ frame: 'panel_icons_14', flag: WeaponFlag.REAR_FIRE, label: 'REAR FIRE' });
     }
 
-    if (!(this.weaponCollection & WeaponFlag.CATELLITE)) {
+    if (!(loadout & WeaponFlag.CATELLITE)) {
       options.push({ frame: 'panel_icons_15', flag: WeaponFlag.CATELLITE, label: 'CAT' });
     }
 
-    if (!(this.weaponCollection & WeaponFlag.DOUBLE_FIRE)) {
+    if (!(loadout & WeaponFlag.DOUBLE_FIRE)) {
       options.push({ frame: 'panel_icons_16', flag: WeaponFlag.DOUBLE_FIRE, label: 'FAST FIRE' });
     }
 
-    if (!(this.weaponCollection & WeaponFlag.WIZ_SPREAD_FIRE)) {
+    if (!(loadout & WeaponFlag.WIZ_SPREAD_FIRE)) {
       options.push({ frame: 'panel_icons_17', flag: WeaponFlag.WIZ_SPREAD_FIRE, label: 'WIZ SPREAD FIRE' });
-    } else if (!(this.weaponCollection & WeaponFlag.CAT_SPREAD_FIRE)) {
+    } else if (!(loadout & WeaponFlag.CAT_SPREAD_FIRE)) {
       options.push({ frame: 'panel_icons_18', flag: WeaponFlag.CAT_SPREAD_FIRE, label: 'CAT SPREAD FIRE' });
     }
 
+    // "Always spawn an exit! ALWAYS!" — C++ :78-81.
     options.push({ frame: 'panel_icons_21', flag: 0, label: 'NO BONUS' });
     return options;
   }
@@ -179,14 +195,25 @@ export default class LaboratoryScene extends Phaser.Scene {
 
   private confirmSelection(): void {
     if (this.complete) return;
+    // C++ :104-108 — FIRE is only read once the icon ring has finished fading
+    // in. Without this a FIRE still held from the level (the on-screen touch
+    // button in particular, which reports as held rather than as a fresh press)
+    // confirmed the first icon on the laboratory's opening frame.
+    if (this.fireLockFrames > 0) return;
     this.complete = true;
 
     const selected = this.options[this.selectedIndex];
     if (selected && selected.flag !== 0) {
+      // C++ :152-157 writes the chosen flag into wizball_starting_loadout. The
+      // in-level collection gets it too so the upgrade still lands if the scene
+      // payload isn't carrying a permanent loadout yet.
+      this.startingLoadout |= selected.flag;
       this.weaponCollection |= selected.flag;
       if (selected.flag === WeaponFlag.WIZ_SPREAD_FIRE) {
+        this.startingLoadout &= ~WeaponFlag.CAT_SPREAD_FIRE;
         this.weaponCollection &= ~WeaponFlag.CAT_SPREAD_FIRE;
       } else if (selected.flag === WeaponFlag.CAT_SPREAD_FIRE) {
+        this.startingLoadout &= ~WeaponFlag.WIZ_SPREAD_FIRE;
         this.weaponCollection &= ~WeaponFlag.WIZ_SPREAD_FIRE;
       }
     } else {
@@ -207,6 +234,10 @@ export default class LaboratoryScene extends Phaser.Scene {
     const shared = {
       score: this.score,
       weaponCollection: this.weaponCollection,
+      // C++ :170 set_global_flag (wizball_starting_loadout, ...). Forwarded even
+      // when GameScene doesn't read it yet — an ignored extra payload field is
+      // harmless, a dropped one loses the permanent upgrade.
+      startingLoadout: this.startingLoadout,
       lives: this.lives
     };
 
@@ -230,6 +261,18 @@ export default class LaboratoryScene extends Phaser.Scene {
   update(): void {
     if (this.complete) return;
 
+    if (this.fireLockFrames > 0) this.fireLockFrames--;
+
+    // NOTE ON DIRECTION: C++ :94-102 has RIGHT decrement and LEFT increment,
+    // which looks inverted next to the mapping below — but it isn't. In the C++
+    // the icons sit on a ring (lab_permanent_upgrade_icon.txt: world_x =
+    // 128*sin(current_angle - index*angle_size) + 320), so the index grows
+    // leftwards around the ring and LEFT+1 selects the icon visually to the
+    // left. This port draws a linear row with index growing rightwards
+    // (createIcons: startX + index * spacing), so LEFT-1 selects the icon
+    // visually to the left — same result, mirrored geometry. The C++ bounds
+    // `!< 0 !> icon_total_indices_minus_one` are a modular wrap, not a clamp
+    // (scripting.cpp:6186-6193, 6206-6213), which Phaser.Math.Wrap matches.
     if (Phaser.Input.Keyboard.JustDown(this.cursors.left!)) {
       this.moveSelection(-1);
     } else if (Phaser.Input.Keyboard.JustDown(this.cursors.right!)) {

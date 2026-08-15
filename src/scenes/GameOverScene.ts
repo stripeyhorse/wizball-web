@@ -3,18 +3,21 @@ import { GAME } from '../types/game';
 import HiScoreSystem from '../systems/HiScoreSystem';
 import { playSceneMusic, type SceneMusic } from '../systems/MusicManager';
 
+// C++ HISCORE_MAX_NAME_LENGTH = 13 (wizball/processed_scripts_test.txt:9941).
+const MAX_NAME_LENGTH = 13;
+
 export default class GameOverScene extends Phaser.Scene {
   private score: number = 0;
   private level: number = 1;
   private hiScoreSystem!: HiScoreSystem;
   private gameOverText!: Phaser.GameObjects.Text;
   private scoreText!: Phaser.GameObjects.Text;
-  private restartText!: Phaser.GameObjects.Text;
+  private restartText?: Phaser.GameObjects.Text;
   private blinkTimer: number = 0;
   private showRestart: boolean = true;
   private isNewHighScore: boolean = false;
   private nameInput: string = '';
-  private nameText!: Phaser.GameObjects.Text;
+  private nameText?: Phaser.GameObjects.Text;
   private enteringName: boolean = false;
   private currentMusic: SceneMusic | null = null;
   private firePrev = false;
@@ -26,8 +29,19 @@ export default class GameOverScene extends Phaser.Scene {
   init(data: { score?: number; level?: number } = {}): void {
     this.score = data.score || 0;
     this.level = data.level || 1;
+    // Per-visit state: Phaser reuses this scene instance for every
+    // scene.start(), so anything set as a field initialiser survives a restart.
+    // nameText/restartText in particular were left pointing at Text objects the
+    // previous shutdown had already destroyed, and update() kept poking them.
     this.nameInput = '';
     this.enteringName = false;
+    this.isNewHighScore = false;
+    this.blinkTimer = 0;
+    this.showRestart = true;
+    this.firePrev = false;
+    this.currentMusic = null;
+    this.nameText = undefined;
+    this.restartText = undefined;
   }
 
   create(): void {
@@ -73,11 +87,15 @@ export default class GameOverScene extends Phaser.Scene {
       }
     });
 
-    // Touch / mouse (mobile): tap to confirm — auto-fills the name if needed.
-    this.input.on('pointerdown', this.touchConfirm, this);
+    // Touch only: tap to confirm — auto-fills the name if needed. This used to
+    // fire for the mouse as well, so one idle desktop click during name entry
+    // filed the run under "YOU" with no way back.
+    this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      if (pointer.wasTouch) this.touchConfirm();
+    });
 
     if (this.cache.audio.exists('wizball_explode')) {
-      this.sound.add('wizball_explode', { volume: 0.7 }).play();
+      this.sound.play('wizball_explode', { volume: 0.7 });
     }
 
     this.currentMusic = playSceneMusic(this, 'wizball_game_over', { loop: false });
@@ -100,13 +118,19 @@ export default class GameOverScene extends Phaser.Scene {
       fontStyle: 'bold'
     }).setOrigin(0.5);
 
-    this.add.text(320, 240, 'ENTER YOUR NAME:', {
+    this.add.text(320, 236, `TYPE YOUR NAME (UP TO ${MAX_NAME_LENGTH}), THEN ENTER`, {
       fontSize: '14px',
       color: '#ffffff',
       fontFamily: 'monospace'
     }).setOrigin(0.5);
 
-    this.nameText = this.add.text(320, 280, '___', {
+    this.add.text(320, 256, 'ESC TO SKIP', {
+      fontSize: '12px',
+      color: '#888888',
+      fontFamily: 'monospace'
+    }).setOrigin(0.5);
+
+    this.nameText = this.add.text(320, 290, '_', {
       fontSize: '32px',
       color: '#88ff88',
       fontFamily: 'monospace',
@@ -123,16 +147,30 @@ export default class GameOverScene extends Phaser.Scene {
     });
   }
 
+  // Trailing '_' is the cursor. The old placeholder was padEnd(3, '_'), left
+  // over from the 3-character limit — it implied a fixed 3-slot field.
+  private renderName(): string {
+    return this.nameInput.length >= MAX_NAME_LENGTH ? this.nameInput : this.nameInput + '_';
+  }
+
   private handleNameInput(event: KeyboardEvent): void {
-    // C++ HISCORE_MAX_NAME_LENGTH = 13 (was capped at 3 here).
-    if (event.key.length === 1 && /[a-zA-Z0-9 ]/.test(event.key) && this.nameInput.length < 13) {
+    // Space is deliberately NOT an accepted name character. Phaser dispatches
+    // Key.onDown before this generic keydown handler, so with an empty name the
+    // first SPACE no-opped in handleInput() and then landed here as a literal
+    // space; the second SPACE saw length >= 1 and filed the score under " ".
+    // Players mash SPACE all game, so that was the common case, not the edge one.
+    if (event.key.length === 1 && /[a-zA-Z0-9]/.test(event.key) && this.nameInput.length < MAX_NAME_LENGTH) {
       this.nameInput += event.key.toUpperCase();
-      this.nameText.setText(this.nameInput.padEnd(3, '_'));
+      this.nameText?.setText(this.renderName());
     } else if (event.key === 'Backspace' && this.nameInput.length > 0) {
       this.nameInput = this.nameInput.slice(0, -1);
-      this.nameText.setText(this.nameInput.padEnd(3, '_'));
+      this.nameText?.setText(this.renderName());
     } else if (event.key === 'Enter' && this.nameInput.length >= 1) {
       this.submitScore();
+    } else if (event.key === 'Escape') {
+      // Escape hatch: SPACE/ENTER both need a name, so without this a player who
+      // does not want to type one has no way off this screen.
+      this.cancelNameEntry();
     }
   }
 
@@ -142,11 +180,28 @@ export default class GameOverScene extends Phaser.Scene {
     this.showRestartPrompt();
 
     if (this.nameText) {
+      this.tweens.killTweensOf(this.nameText);
       this.nameText.destroy();
+      this.nameText = undefined;
+    }
+  }
+
+  // Leave the run unrecorded and fall through to the restart prompt.
+  private cancelNameEntry(): void {
+    this.enteringName = false;
+    this.showRestartPrompt();
+
+    if (this.nameText) {
+      this.tweens.killTweensOf(this.nameText);
+      this.nameText.destroy();
+      this.nameText = undefined;
     }
   }
 
   private showRestartPrompt(): void {
+    // Start the blink from "visible" so the prompt can't appear mid-off-phase.
+    this.blinkTimer = 0;
+    this.showRestart = true;
     this.restartText = this.add.text(320, 340, 'PRESS SPACE TO RESTART', {
       fontSize: '18px',
       color: '#ffffff',
@@ -175,9 +230,11 @@ export default class GameOverScene extends Phaser.Scene {
   }
 
   private restartGame(): void {
+    // One-shot via sound.play(): sound.add() leaves an undestroyed Sound on the
+    // global manager every game over (MusicManager.ts:26-34 has the owned-sound
+    // pattern for anything that needs a handle).
     if (this.cache.audio.exists('menu_select')) {
-      const sound = this.sound.add('menu_select', { volume: 0.6 });
-      sound.play();
+      this.sound.play('menu_select', { volume: 0.6 });
     }
 
     this.scene.start(GAME, { level: 1 });

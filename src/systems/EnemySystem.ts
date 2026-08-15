@@ -1,13 +1,25 @@
 import * as Phaser from 'phaser';
 import { Depth } from '../config/depths';
 import {
-  generateLevelWaves,
   WaveConfig,
   BULLET_TYPE_NONE,
   BULLET_TYPE_SINGLE_DIRECTED,
   BULLET_TYPE_SPREAD,
   BULLET_FREQUENCY_RANDOM,
   BULLET_FREQUENCY_FIXED,
+  POSITION_TOP,
+  POSITION_MIDDLE,
+  POSITION_TOP_MIDDLE,
+  POSITION_BOTTOM,
+  POSITION_TOP_BOTTOM,
+  POSITION_MIDDLE_BOTTOM,
+  POSITION_ALL,
+  VERTICAL_PLACEMENT_UNSET,
+  VERTICAL_BOUNCE_FLOOR,
+  VERTICAL_BOUNCE_ROOF,
+  VERTICAL_POSITION_TOP,
+  VERTICAL_POSITION_MIDDLE,
+  VERTICAL_POSITION_BOTTOM,
 } from '../data/waves';
 import { EnemyType } from '../types/enemies';
 import type { ParsedTilemap, SpawnPoint } from './TilemapParser';
@@ -34,6 +46,8 @@ const UAD_BEHAVIOUR_DISTANCE_HORIZONTAL = 25600;
 const UAD_BEHAVIOUR_LENGTH_PAUSED = 50;
 
 const LEVEL_HEIGHT = 368;
+// C++ constant.txt:185 — player_on_level_number is 0-based, so the divisor is 7.
+const CONST_NUMBER_OF_LEVELS_MINUS_ONE = 7;
 
 const SPREAD_ANGLES = [0, 4500, 9000, 13500, 18000, 22500, 27000, 31500];
 
@@ -43,7 +57,6 @@ const MAX_WAVE_SIZE = 10;
 // Paint-bubble tints (0=Red, 1=Green, 2=Blue) — matches GameScene PAINT_FRAME_COLORS.
 const PAINT_TINTS = [0xff0000, 0x00ff00, 0x0000ff];
 const PAINT_BUBBLE_WAVE_COUNT = 3;
-const POSITION_ALL = 7;
 
 interface WaveSpawnSlot {
   x: number;
@@ -70,10 +83,70 @@ const FUZZ_EXIT_THRESHOLD = 1000000;
 // C++ function_normal_enemy_am_i_off_screen — an enemy counts as off-screen once
 // it is this far from the camera centre (on-screen re-entry uses 344).
 const OFF_SCREEN_DISTANCE = 368;
+// C++ function_normal_enemy_am_i_on_screen — HALF_SCREEN_PLUS_ENTRANCE_PHANTOM_ZONE
+// plus the vertical phantom zone, used by enemies AND enemy bullets.
+const ON_SCREEN_DISTANCE = 344;
+const ON_SCREEN_MIN_Y = -16;
+const ON_SCREEN_MAX_Y = 432;
+
+// C++ generic_level_enemy.txt:302-325 / 771-833 — every enemy but the fuzz cycles
+// through these: hidden at its anchor until it is genuinely off-screen, then armed
+// and waiting for the camera to come back, then live.
+const LIFECYCLE_WAIT_OFF_SCREEN = 0;
+const LIFECYCLE_WAIT_ON_SCREEN = 1;
+const LIFECYCLE_ACTIVE = 2;
 
 const BOBBLE_HAT_START_DISTANCE = 128;
 const BOBBLE_HAT_GRAVITY = 64;
 const BOBBLE_HAT_INITIAL_FIRING_DELAY = 200;
+const BOBBLE_HAT_MIN_HORIZONTAL_SPEED = 128;
+const BOBBLE_HAT_MAX_HORIZONTAL_SPEED = 256;
+
+// C++ constant.txt:373-378
+const CRABBY_BOUNCER_MIN_START_DISTANCE = 96;
+const CRABBY_BOUNCER_MAX_START_DISTANCE = 144;
+const CRABBY_BOUNCER_FLOOR_BOUNCE_BONUS = 128;
+const CRABBY_BOUNCER_MIN_HORIZONTAL_SPEED = 128;
+const CRABBY_BOUNCER_MAX_HORIZONTAL_SPEED = 256;
+const CRABBY_BOUNCER_GRAVITY = 48;
+
+// C++ constant.txt:382-386
+const MOLECULE_BOUNCER_START_DISTANCE = 272;
+const MOLECULE_BOUNCER_MIN_HORIZONTAL_SPEED = 128;
+const MOLECULE_BOUNCER_MAX_HORIZONTAL_SPEED = 256;
+const MOLECULE_BOUNCER_GRAVITY = 48;
+const MOLECULE_BOUNCER_INITIAL_FIRING_DELAY = 300;
+
+// C++ constant.txt:406-411
+const PAINT_BUBBLE_START_DISTANCE = 272;
+const PAINT_BUBBLE_MIN_HORIZONTAL_SPEED = 0;
+const PAINT_BUBBLE_MAX_HORIZONTAL_SPEED = 256;
+const PAINT_BUBBLE_MIN_GRAVITY = 40;
+const PAINT_BUBBLE_MAX_GRAVITY = 56;
+const PAINT_BUBBLE_MIDDLE_DEVIATION = 64;
+
+// C++ constant.txt:348-351, 357-361
+const UAD_START_DISTANCE = 32;
+const UAD_MIN_SPEED = 512;
+const UAD_MAX_SPEED = 768;
+const UAD_SPEED_PER_LEVEL_INCREASE = 64;
+const PLANE_START_DISTANCE = 96;
+const PLANE_MIN_SPEED = 512;
+const PLANE_MAX_SPEED = 512;
+const PLANE_SPEED_PER_LEVEL_INCREASE = 64;
+const PLANE_INITIAL_FIRING_DELAY = 200;
+
+// C++ constant.txt:423-424
+const SOLID_DIAMOND_DEVIANT_MIN_VERTICAL_SPEED = 512;
+const SOLID_DIAMOND_DEVIANT_MAX_VERTICAL_SPEED = 768;
+const SOLID_DIAMOND_INITIAL_FIRING_DELAY = 200;
+
+// C++ spawn_molecule_bonus_wave.txt:92-105 — the scatter box is half the spawn
+// box on each axis, capped at this.
+const BONUS_MOLECULE_MAX_DEVIATION = 96;
+
+// Port-only floor on the set-power bounce so a bouncer can never settle.
+const MINIMUM_BOUNCE_SPEED = 768;
 
 interface EnemyData {
   enemyType: EnemyType;
@@ -91,8 +164,15 @@ interface EnemyData {
   bulletSpeedPercentage: number;
   skipFirstShot: boolean;
   directionMultiplier: number;
-  patrolStartX: number;
-  patrolStartY: number;
+  // C++ lifecycle state (LIFECYCLE_*) plus the anchor and the starting
+  // velocity/acceleration it is restored to every time it recycles
+  // (generic_level_enemy.txt:284-285, :815-833, :885-891).
+  lifecycle: number;
+  startingWorldX: number;
+  startingWorldY: number;
+  startingXVel: number;
+  startingYVel: number;
+  startingYAcc: number;
   // Path-following fields (solid diamonds, fuzz)
   specialPath: SpecialPath | null;
   pathPercentage: number;
@@ -100,9 +180,6 @@ interface EnemyData {
   pathSection: number;
   baseWorldX: number;
   baseWorldY: number;
-  // Bobble hat bounce fields
-  startY: number;
-  bounceFromFloor: boolean;
   // Paint-bubble colour (0=R,1=G,2=B) so the dropped paint matches the bubble.
   paintColor?: number;
 }
@@ -222,25 +299,9 @@ export default class EnemySystem {
   private spawnRegularEnemies(level: number): void {
     this.currentLevel = level;
     this.currentLevelWidth = this.scene.cameras.main.getBounds().right;
-
-    if (this.waveSpawnSlots.length > 0) {
-      this.spawnConfiguredWaveSet(level);
-      return;
-    }
-
-    const fallbackWaves = generateLevelWaves(level);
-    fallbackWaves.waves.forEach((wave, index) => {
-      const fallbackSlot: WaveSpawnSlot = {
-        x: 200 + index * 220,
-        y: LEVEL_HEIGHT / 2,
-        boxStartX: 80 + index * 220,
-        boxStartY: 48,
-        boxEndX: Math.min(this.currentLevelWidth - 80, 320 + index * 220),
-        boxEndY: LEVEL_HEIGHT - 48,
-        allowedPositions: POSITION_ALL,
-      };
-      this.spawnWave(wave, fallbackSlot, level);
-    });
+    // Every shipped tilemap carries RANDOM_ENEMY_WAVE_SELECTION spawn points; if
+    // one somehow doesn't, the C++ simply has no waves on that level.
+    this.spawnConfiguredWaveSet(level);
   }
 
   maybeSpawnReplacementWave(level: number): boolean {
@@ -296,17 +357,20 @@ export default class EnemySystem {
     const levelPaintColor = ((level - 1) % 3 + 3) % 3;
 
     this.waveSpawnSlots.forEach((slot, index) => {
+      const boxMinY = Math.min(slot.boxStartY, slot.boxEndY);
+      const boxMaxY = Math.max(slot.boxStartY, slot.boxEndY);
+
       let wave: WaveConfig;
       if (bubbleIndices.has(index)) {
         if (Math.random() < (1 / 13)) {
-          wave = this.createWaveConfig(EnemyType.BONUS_MOLECULE, level, slot.allowedPositions);
+          wave = this.createWaveConfig(EnemyType.BONUS_MOLECULE, level, slot.allowedPositions, boxMinY, boxMaxY);
         } else {
-          wave = this.createWaveConfig(EnemyType.PAINT_BUBBLES, level, slot.allowedPositions);
+          wave = this.createWaveConfig(EnemyType.PAINT_BUBBLES, level, slot.allowedPositions, boxMinY, boxMaxY);
           wave.paintColor = levelPaintColor;
-          wave.paintVariant = this.pickPaintBubbleVariant(slot.allowedPositions);
         }
       } else {
-        wave = this.createWaveConfig(this.pickRegularEnemyType(slot.allowedPositions), level, slot.allowedPositions);
+        const type = this.pickRegularEnemyType(slot.allowedPositions);
+        wave = this.createWaveConfig(type, level, slot.allowedPositions, boxMinY, boxMaxY);
       }
 
       this.spawnWave(wave, slot, level);
@@ -314,66 +378,136 @@ export default class EnemySystem {
   }
 
   private spawnWave(wave: WaveConfig, slot: WaveSpawnSlot, level: number): void {
-    const minX = Math.min(slot.boxStartX, slot.boxEndX);
-    const maxX = Math.max(slot.boxStartX, slot.boxEndX);
-    const minY = Math.min(slot.boxStartY, slot.boxEndY);
-    const maxY = Math.max(slot.boxStartY, slot.boxEndY);
-    const boxWidth = Math.max(1, maxX - minX);
+    if (wave.type === EnemyType.BONUS_MOLECULE) {
+      this.spawnBonusMoleculeWave(wave, slot, level);
+      return;
+    }
+
+    // C++ random_enemy_wave_selection.txt:38-45 — the spawner entity sits at the
+    // box's top-left corner and every child is placed relative to IT, so the row
+    // is centred on the corner and is allowed to spill outside the box.
+    const boxWidth = Math.abs(slot.boxEndX - slot.boxStartX);
     let xSpread = wave.xSpread;
 
-    while (xSpread > 1 && (xSpread * Math.max(1, wave.count - 1)) > boxWidth) {
+    // C++ spawn_plane_wave.txt:78-96 (and every sibling script): the starting
+    // deviation is computed from the UNSHRUNK spread, and only the per-child step
+    // is then shrunk to fit the box. The shrink test uses wave_size, not size-1.
+    let xDeviation = Math.trunc(-(wave.count * xSpread) / 2);
+    while (xSpread > 1 && (xSpread * wave.count) > boxWidth) {
       xSpread -= 1;
     }
 
-    const centerX = (minX + maxX) / 2;
+    for (let i = 0; i < wave.count; i++) {
+      const x = slot.boxStartX + xDeviation;
+      const y = this.pickSpawnY(wave, slot.boxStartY);
+      this.spawnEnemyFromWave(x, y, wave, level);
+      xDeviation += xSpread;
+    }
+  }
+
+  // C++ spawn_molecule_bonus_wave.txt:71-113 — the bonus-molecule spawner first
+  // re-centres itself on the box midpoint, then scatters each child by a random
+  // deviation on BOTH axes (half the box, capped at ±96): a cloud, not a row.
+  private spawnBonusMoleculeWave(wave: WaveConfig, slot: WaveSpawnSlot, level: number): void {
+    const centreX = Math.trunc((slot.boxStartX + slot.boxEndX) / 2);
+    const centreY = Math.trunc((slot.boxStartY + slot.boxEndY) / 2);
+
+    const halfWidth = Math.min(
+      BONUS_MOLECULE_MAX_DEVIATION,
+      Math.trunc(Math.abs(slot.boxEndX - slot.boxStartX) / 2)
+    );
+    const halfHeight = Math.min(
+      BONUS_MOLECULE_MAX_DEVIATION,
+      Math.trunc(Math.abs(slot.boxEndY - slot.boxStartY) / 2)
+    );
 
     for (let i = 0; i < wave.count; i++) {
-      const x = Phaser.Math.Clamp(centerX + (i - (wave.count - 1) / 2) * xSpread, minX, maxX);
-      const y = this.pickSpawnY(wave, minY, maxY);
+      const x = centreX + Phaser.Math.Between(-halfWidth, halfWidth);
+      const y = centreY + Phaser.Math.Between(-halfHeight, halfHeight);
       this.spawnEnemyFromWave(x, y, wave, level);
     }
   }
 
-  private pickSpawnY(wave: WaveConfig, minY: number, maxY: number): number {
-    if (minY === maxY) {
-      return minY;
-    }
+  // C++ generic_level_enemy.txt:247-282 — passed_in_*_height is a DISTANCE, not a
+  // Y: temp_1 = rand(min,max); TOP_START_Y = temp_1; BOTTOM_START_Y = level_height
+  // - temp_1; then top_or_bottom_flag picks which of those becomes WORLD_Y. With
+  // no flag set (hollow diamonds/circles, solid-diamond deviants, bonus molecules)
+  // the child simply stays where the spawner put it.
+  private pickSpawnY(wave: WaveConfig, anchorY: number): number {
+    const height = Phaser.Math.Between(
+      Math.min(wave.minHeight, wave.maxHeight),
+      Math.max(wave.minHeight, wave.maxHeight)
+    );
 
-    switch (wave.type) {
-      case EnemyType.HOLLOW_DIAMONDS:
-      case EnemyType.HOLLOW_CIRCLES:
-      case EnemyType.PLANES:
-      case EnemyType.UP_AND_DOWNERS:
-        return Phaser.Math.Between(minY, maxY);
-      case EnemyType.PAINT_BUBBLES:
-        // Middle bubbles wobble in the mid-field; edge bubbles bounce from the
-        // roof/floor (C++ spawn_paintball_wave top_or_bottom_flag → start height).
-        return wave.paintVariant === 'middle'
-          ? Phaser.Math.Between(minY, maxY)
-          : (Math.random() > 0.5 ? minY : maxY);
+    switch (wave.verticalPlacement) {
+      case VERTICAL_BOUNCE_FLOOR:
+      case VERTICAL_POSITION_BOTTOM:
+        return LEVEL_HEIGHT - height;
+      case VERTICAL_BOUNCE_ROOF:
+      case VERTICAL_POSITION_TOP:
+        return height;
+      case VERTICAL_POSITION_MIDDLE:
+        return LEVEL_HEIGHT / 2;
       default:
-        return maxY;
+        return anchorY;
     }
   }
 
-  // C++ spawn_paintball_wave.txt switch on the wave's allowed position (1=T, 2=M,
-  // 3=TM, 4=B, 5=TB, 6=MB, 7=TMB): decides whether this paint-bubble wave does
-  // the mid-field circular wobble ('middle') or a roof/floor gravity bounce ('edge').
-  private pickPaintBubbleVariant(allowedPositions: number): 'middle' | 'edge' {
-    switch (allowedPositions) {
-      case 2: // M
-        return 'middle';
-      case 1: // T
-      case 4: // B
-      case 5: // TB
-        return 'edge';
-      case 3: // TM → roof or middle
-      case 6: // MB → floor or middle
-        return Math.random() < 0.5 ? 'middle' : 'edge';
-      case 7: // TMB → floor / roof / middle
+  // C++ spawn_paintball_wave.txt:102-135 — switch on the slot's allowed positions
+  // (1=T, 2=M, 3=TM, 4=B, 5=TB, 6=MB, 7=TMB). Every shipped slot is 7, which rolls
+  // floor-bounce / roof-bounce / mid-field wobble evenly.
+  private pickPaintBubblePlacement(allowedPositions: number): number {
+    switch (allowedPositions & POSITION_ALL) {
+      case POSITION_TOP:
+        return VERTICAL_BOUNCE_ROOF;
+      case POSITION_MIDDLE:
+        return VERTICAL_POSITION_MIDDLE;
+      case POSITION_TOP_MIDDLE:
+        return Math.random() < 0.5 ? VERTICAL_BOUNCE_ROOF : VERTICAL_POSITION_MIDDLE;
+      case POSITION_BOTTOM:
+        return VERTICAL_BOUNCE_FLOOR;
+      case POSITION_TOP_BOTTOM:
+        return Math.random() < 0.5 ? VERTICAL_BOUNCE_FLOOR : VERTICAL_BOUNCE_ROOF;
+      case POSITION_MIDDLE_BOTTOM:
+        return Math.random() < 0.5 ? VERTICAL_BOUNCE_FLOOR : VERTICAL_POSITION_MIDDLE;
+      case POSITION_ALL:
       default:
-        return Math.random() < (1 / 3) ? 'middle' : 'edge';
+        return Phaser.Math.RND.pick([
+          VERTICAL_BOUNCE_FLOOR,
+          VERTICAL_BOUNCE_ROOF,
+          VERTICAL_POSITION_MIDDLE,
+        ]);
     }
+  }
+
+  // C++ spawn_crabby_bouncer_wave.txt:113-121 / spawn_bobble_hat_wave.txt:95-103 /
+  // spawn_molecule_bouncer_wave.txt:98-108 — the gravity bouncers test the slot
+  // against POSITION_5_TB and roll floor-bounce or roof-bounce 50/50 when both are
+  // allowed (every shipped slot is POSITION 7, so both always are).
+  private pickBouncePlacement(allowedPositions: number): number {
+    const tb = allowedPositions & POSITION_TOP_BOTTOM;
+
+    if (tb === POSITION_TOP_BOTTOM) {
+      return Math.random() < 0.5 ? VERTICAL_BOUNCE_FLOOR : VERTICAL_BOUNCE_ROOF;
+    }
+    if (tb === POSITION_BOTTOM) {
+      return VERTICAL_BOUNCE_FLOOR;
+    }
+    return VERTICAL_BOUNCE_ROOF;
+  }
+
+  // C++ spawn_up_and_downer_wave.txt:106-114 — the same POSITION_5_TB test, but
+  // up-and-downers get a static top/bottom placement rather than a bounce.
+  private pickTopOrBottomPlacement(allowedPositions: number): number {
+    const tb = allowedPositions & POSITION_TOP_BOTTOM;
+
+    if (tb === POSITION_TOP_BOTTOM) {
+      return Math.random() < 0.5 ? VERTICAL_POSITION_TOP : VERTICAL_POSITION_BOTTOM;
+    }
+    if (tb === POSITION_BOTTOM) {
+      return VERTICAL_POSITION_BOTTOM;
+    }
+    return VERTICAL_POSITION_TOP;
   }
 
   private pickRegularEnemyType(allowedPositions: number): EnemyType {
@@ -387,7 +521,17 @@ export default class EnemySystem {
     return type;
   }
 
-  private createWaveConfig(type: EnemyType, level: number, allowedPositions: number): WaveConfig {
+  private createWaveConfig(
+    type: EnemyType,
+    level: number,
+    allowedPositions: number,
+    boxMinY: number,
+    boxMaxY: number
+  ): WaveConfig {
+    // C++ constant.txt:184-185 — player_on_level_number is 0-BASED. The port's
+    // currentLevel is 1-based, so every level-scaled formula uses this instead
+    // (matching the (level - 1) the paint colour already uses).
+    const levelIndex = Math.max(0, level - 1);
     const count = this.randomWaveSize();
     let firingBehaviour = BULLET_TYPE_NONE;
     let firingFrequency = 120;
@@ -400,122 +544,198 @@ export default class EnemySystem {
     let minGravity = 0;
     let maxGravity = 0;
     let xSpread = 24;
+    // C++ passed_in_min_height / passed_in_max_height + top_or_bottom_flag.
+    let minHeight = 0;
+    let maxHeight = 0;
+    let verticalPlacement = VERTICAL_PLACEMENT_UNSET;
+    // WAVE_SUB_TYPE_UNIFORM waves roll ONE speed for the whole wave and hand it
+    // to every child — that is what makes a wave read as a formation.
+    let uniformSpeed = 0;
 
     switch (type) {
       case EnemyType.PAINT_BUBBLES:
-        minSpeed = 0;
-        maxSpeed = 256;
-        minGravity = 40;
-        maxGravity = 56;
+        // C++ spawn_paintball_wave.txt:143-182 (WAVE_SUB_TYPE_UNIFORM).
+        uniformSpeed = Phaser.Math.Between(PAINT_BUBBLE_MIN_HORIZONTAL_SPEED, PAINT_BUBBLE_MAX_HORIZONTAL_SPEED);
+        minSpeed = maxSpeed = uniformSpeed;
+        minGravity = PAINT_BUBBLE_MIN_GRAVITY;
+        maxGravity = PAINT_BUBBLE_MAX_GRAVITY;
         gravity = Phaser.Math.Between(minGravity, maxGravity);
         xSpread = Phaser.Math.Between(16, 32);
-        if (level >= 3) {
+        verticalPlacement = this.pickPaintBubblePlacement(allowedPositions);
+        if (verticalPlacement === VERTICAL_POSITION_MIDDLE) {
+          // :198-200 — mid-field bubbles are seeded anywhere within ±64 of the
+          // level's vertical centre.
+          minHeight = (LEVEL_HEIGHT / 2) - PAINT_BUBBLE_MIDDLE_DEVIATION;
+          maxHeight = (LEVEL_HEIGHT / 2) + PAINT_BUBBLE_MIDDLE_DEVIATION;
+        } else {
+          minHeight = maxHeight = PAINT_BUBBLE_START_DISTANCE;
+        }
+        // :166-171 — paint bubbles only shoot from (0-based) level 3 onwards,
+        // and even then only on a per-wave rand(0,8) < level roll.
+        if (levelIndex >= 3 && Phaser.Math.Between(0, 8) < levelIndex) {
           firingBehaviour = BULLET_TYPE_SINGLE_DIRECTED | BULLET_FREQUENCY_RANDOM;
         }
-        firingFrequency = Math.max(30, 300 - (level * 35));
-        firingInitialDelay = firingFrequency;
+        firingFrequency = Math.max(30, 300 - (levelIndex * 35));
+        // :246 — the engine's "%" is a percentage multiply, so 20000 = twice.
+        firingInitialDelay = firingFrequency * 2;
         break;
 
       case EnemyType.HOLLOW_DIAMONDS:
+        // C++ spawn_hollow_diamond_wave.txt (WAVE_SUB_TYPE_RANDOM): per-enemy
+        // speed, and the start height is the raw spawn box.
         minSpeed = 256;
         maxSpeed = 512;
         minVerticalSpeed = 256;
         maxVerticalSpeed = 768;
+        minHeight = boxMinY;
+        maxHeight = boxMaxY;
         xSpread = Phaser.Math.Between(16, 32);
         firingBehaviour = BULLET_TYPE_SINGLE_DIRECTED | BULLET_FREQUENCY_FIXED;
-        firingFrequency = Math.max(30, 300 - (level * 5));
+        firingFrequency = Math.max(30, 300 - (levelIndex * 5));
         firingInitialDelay = 75;
         break;
 
       case EnemyType.CRABBY_BOUNCERS:
-        minSpeed = 128;
-        maxSpeed = 256;
-        gravity = minGravity = maxGravity = 48;
+        // C++ spawn_crabby_bouncer_wave.txt:102-135 (WAVE_SUB_TYPE_RANDOM).
+        minSpeed = CRABBY_BOUNCER_MIN_HORIZONTAL_SPEED;
+        maxSpeed = CRABBY_BOUNCER_MAX_HORIZONTAL_SPEED;
+        gravity = minGravity = maxGravity = CRABBY_BOUNCER_GRAVITY;
         xSpread = Phaser.Math.Between(16, 48);
-        firingFrequency = Math.max(30, 120 - (level * 5));
+        verticalPlacement = this.pickBouncePlacement(allowedPositions);
+        minHeight = CRABBY_BOUNCER_MIN_START_DISTANCE;
+        maxHeight = CRABBY_BOUNCER_MAX_START_DISTANCE;
+        if (verticalPlacement === VERTICAL_BOUNCE_FLOOR) {
+          // :131-134 — floor bouncers get a bonus so their apex still lands in
+          // the same 96..144 band measured from the roof.
+          minHeight += CRABBY_BOUNCER_FLOOR_BOUNCE_BONUS;
+          maxHeight += CRABBY_BOUNCER_FLOOR_BOUNCE_BONUS;
+        }
+        // No passed_in_firing_behaviour at all in the script: crabbies never fire.
+        firingFrequency = Math.max(30, 120 - (levelIndex * 5));
         firingInitialDelay = firingFrequency;
         break;
 
       case EnemyType.MOLECULE_BOUNCERS:
-        minSpeed = 128;
-        maxSpeed = 256;
-        gravity = minGravity = maxGravity = 48;
+        // C++ spawn_molecule_bouncer_wave.txt:110-145 (WAVE_SUB_TYPE_UNIFORM).
+        uniformSpeed = Phaser.Math.Between(MOLECULE_BOUNCER_MIN_HORIZONTAL_SPEED, MOLECULE_BOUNCER_MAX_HORIZONTAL_SPEED);
+        minSpeed = maxSpeed = uniformSpeed;
+        gravity = minGravity = maxGravity = MOLECULE_BOUNCER_GRAVITY;
         xSpread = Phaser.Math.Between(32, 48);
-        firingBehaviour = Math.random() > 0.5
+        verticalPlacement = this.pickBouncePlacement(allowedPositions);
+        minHeight = maxHeight = MOLECULE_BOUNCER_START_DISTANCE;
+        firingBehaviour = Math.random() < 0.5
           ? (BULLET_TYPE_SPREAD | BULLET_FREQUENCY_FIXED)
           : (BULLET_TYPE_SINGLE_DIRECTED | BULLET_FREQUENCY_FIXED);
-        firingFrequency = Math.max(30, 120 - (level * 5));
-        firingInitialDelay = 300;
+        firingFrequency = Math.max(30, 120 - (levelIndex * 5));
+        firingInitialDelay = MOLECULE_BOUNCER_INITIAL_FIRING_DELAY;
         break;
 
       case EnemyType.BONUS_MOLECULE:
-        // C++ spawn_molecule_bonus_wave.txt:119-131 — zero horizontal/vertical
+        // C++ spawn_molecule_bonus_wave.txt:109-131 — zero horizontal/vertical
         // speed, zero gravity, no firing. They sit still (animated), scattered
-        // in a box around the spawn centre, and drop a bonus pearl when killed.
+        // in a cloud around the box centre, and drop a bonus pearl when killed.
         minSpeed = maxSpeed = 0;
         minVerticalSpeed = maxVerticalSpeed = 0;
         gravity = minGravity = maxGravity = 0;
-        xSpread = Phaser.Math.Between(0, 96);   // SPECIAL_RAND(±box_width/2), capped 96
+        xSpread = 0;   // laid out by spawnBonusMoleculeWave, not by a row spread
         // firingBehaviour stays BULLET_TYPE_NONE
         break;
 
       case EnemyType.HOLLOW_CIRCLES:
+        // C++ spawn_hollow_circle_wave.txt (WAVE_SUB_TYPE_RANDOM).
         minSpeed = 256;
         maxSpeed = 512;
         minVerticalSpeed = 256;
         maxVerticalSpeed = 768;
+        minHeight = boxMinY;
+        maxHeight = boxMaxY;
         xSpread = Phaser.Math.Between(16, 32);
         break;
 
       case EnemyType.SOLID_DIAMONDS:
+        // C++ spawn_solid_diamond_wave.txt:97-100 — VERTICAL_POSITION_TOP at a
+        // fixed 224, which is also the parametric path's base Y.
         minVerticalSpeed = maxVerticalSpeed = 256;
+        verticalPlacement = VERTICAL_POSITION_TOP;
+        minHeight = maxHeight = SOLID_DIAMOND_START_DISTANCE;
         xSpread = Phaser.Math.Between(32, 48);
         break;
 
       case EnemyType.BOBBLE_HATS:
-        minSpeed = 128;
-        maxSpeed = 256;
-        gravity = minGravity = maxGravity = 64;
+        // C++ spawn_bobble_hat_wave.txt:105-140 — this one picks its sub-type
+        // 50/50, so half the waves fly in formation and half are ragged.
+        if (Math.random() < 0.5) {
+          uniformSpeed = Phaser.Math.Between(BOBBLE_HAT_MIN_HORIZONTAL_SPEED, BOBBLE_HAT_MAX_HORIZONTAL_SPEED);
+          minSpeed = maxSpeed = uniformSpeed;
+        } else {
+          minSpeed = BOBBLE_HAT_MIN_HORIZONTAL_SPEED;
+          maxSpeed = BOBBLE_HAT_MAX_HORIZONTAL_SPEED;
+        }
+        gravity = minGravity = maxGravity = BOBBLE_HAT_GRAVITY;
         xSpread = Phaser.Math.Between(16, 48);
+        verticalPlacement = this.pickBouncePlacement(allowedPositions);
+        minHeight = maxHeight = BOBBLE_HAT_START_DISTANCE;
         firingBehaviour = BULLET_TYPE_SPREAD | BULLET_FREQUENCY_FIXED;
-        firingFrequency = Math.max(30, 120 - (level * 5));
-        firingInitialDelay = 200;
+        firingFrequency = Math.max(30, 120 - (levelIndex * 5));
+        firingInitialDelay = BOBBLE_HAT_INITIAL_FIRING_DELAY;
         break;
 
       case EnemyType.PLANES:
-        minSpeed = maxSpeed = 512 + level * 64;
+        // C++ spawn_plane_wave.txt:112-147 (WAVE_SUB_TYPE_UNIFORM).
+        uniformSpeed = Phaser.Math.Between(PLANE_MIN_SPEED, PLANE_MAX_SPEED)
+          + (levelIndex * PLANE_SPEED_PER_LEVEL_INCREASE);
+        minSpeed = maxSpeed = uniformSpeed;
+        // :146-147 — the diagonal leg's vertical speed is half the horizontal
+        // one. Without this the "diagonal" phase is flat.
+        minVerticalSpeed = maxVerticalSpeed = Math.trunc(uniformSpeed / 2);
+        verticalPlacement = VERTICAL_POSITION_TOP;
+        minHeight = maxHeight = PLANE_START_DISTANCE;
         xSpread = Phaser.Math.Between(16, 32);
-        firingBehaviour = Math.random() > 0.5
+        firingBehaviour = Math.random() < 0.5
           ? (BULLET_TYPE_SINGLE_DIRECTED | BULLET_FREQUENCY_FIXED)
           : BULLET_TYPE_NONE;
-        firingFrequency = Math.max(30, 120 - (level * 5));
-        firingInitialDelay = 200;
+        firingFrequency = Math.max(30, 120 - (levelIndex * 5));
+        firingInitialDelay = PLANE_INITIAL_FIRING_DELAY;
         break;
 
       case EnemyType.UP_AND_DOWNERS:
-        minSpeed = 512 + level * 64;
-        maxSpeed = 768 + level * 64;
-        minVerticalSpeed = 512;
-        maxVerticalSpeed = 768;
+        // C++ spawn_up_and_downer_wave.txt:112-140 (WAVE_SUB_TYPE_UNIFORM).
+        uniformSpeed = Phaser.Math.Between(UAD_MIN_SPEED, UAD_MAX_SPEED)
+          + (levelIndex * UAD_SPEED_PER_LEVEL_INCREASE);
+        minSpeed = maxSpeed = uniformSpeed;
+        // :139-140 — vertical speed is the SAME rolled value as horizontal
+        // (level bonus included); the leg durations are derived from it.
+        minVerticalSpeed = maxVerticalSpeed = uniformSpeed;
+        verticalPlacement = this.pickTopOrBottomPlacement(allowedPositions);
+        minHeight = maxHeight = UAD_START_DISTANCE;
         xSpread = Phaser.Math.Between(16, 48);
-        firingBehaviour = Math.random() > 0.5
-          ? (BULLET_TYPE_SPREAD | BULLET_FREQUENCY_FIXED)
-          : BULLET_TYPE_NONE;
-        firingFrequency = Math.max(30, 120 - (level * 5));
+        // :117 — SPECIAL_RAND_CHOICE(0, 0, BULLET_TYPE_SPREAD) with NO frequency
+        // bit and no frequency/delay, so fire_shots never fires for them: their
+        // only shot is the explicit one at the paused->vertical transition.
+        firingBehaviour = Math.random() < 0.5 ? BULLET_TYPE_SPREAD : BULLET_TYPE_NONE;
+        firingFrequency = 0;
+        firingInitialDelay = 0;
         break;
 
       case EnemyType.SOLID_DIAMONDS_DEVIANT:
-        minVerticalSpeed = 512;
-        maxVerticalSpeed = 768;
+        // C++ spawn_solid_diamond_wave_deviant_type.txt:99-107 — actual_speed is
+        // rolled ONCE for the whole wave, and the height range is the box.
+        uniformSpeed = Phaser.Math.Between(
+          SOLID_DIAMOND_DEVIANT_MIN_VERTICAL_SPEED,
+          SOLID_DIAMOND_DEVIANT_MAX_VERTICAL_SPEED
+        );
+        minVerticalSpeed = maxVerticalSpeed = uniformSpeed;
+        minHeight = boxMinY;
+        maxHeight = boxMaxY;
         xSpread = Phaser.Math.Between(32, 48);
         firingBehaviour = BULLET_TYPE_SINGLE_DIRECTED | BULLET_FREQUENCY_FIXED;
-        firingFrequency = Math.max(30, 300 - (level * 5));
-        firingInitialDelay = 200;
+        firingFrequency = Math.max(30, 300 - (levelIndex * 5));
+        firingInitialDelay = SOLID_DIAMOND_INITIAL_FIRING_DELAY;
         break;
 
       case EnemyType.FUZZ:
         firingBehaviour = BULLET_TYPE_SINGLE_DIRECTED | BULLET_FREQUENCY_FIXED;
-        firingFrequency = Math.max(20, 60 - (level * 3));
+        firingFrequency = Math.max(20, 60 - (levelIndex * 3));
         break;
     }
 
@@ -523,7 +743,6 @@ export default class EnemySystem {
       type,
       count,
       xSpread,
-      ySpread: 0,
       minSpeed,
       maxSpeed,
       minVerticalSpeed,
@@ -531,22 +750,23 @@ export default class EnemySystem {
       gravity,
       minGravity,
       maxGravity,
+      minHeight,
+      maxHeight,
+      verticalPlacement,
       positionMask: allowedPositions,
-      topOrBottom: 'random',
       firingBehaviour,
       firingFrequency,
       firingInitialDelay,
       bulletSpeedPercentage: 10000,
-      waveSubType: 0,
-      behaviourType: 0,
-      startDistance: 0,
     };
   }
 
   private randomWaveSize(): number {
+    // C++ spawn_*_wave.txt: sqr(rand(MIN^2, MAX^2)) — the engine's integer sqrt
+    // truncates, it doesn't round.
     const minSquared = MIN_WAVE_SIZE * MIN_WAVE_SIZE;
     const maxSquared = MAX_WAVE_SIZE * MAX_WAVE_SIZE;
-    return Math.max(1, Math.round(Math.sqrt(minSquared + Math.random() * (maxSquared - minSquared))));
+    return Math.max(1, Math.floor(Math.sqrt(Phaser.Math.Between(minSquared, maxSquared))));
   }
 
   private spawnEnemyFromWave(x: number, y: number, wave: WaveConfig, _level: number): void {
@@ -565,27 +785,41 @@ export default class EnemySystem {
     body.setCollideWorldBounds(true);
     body.setBounce(1, 1);
 
-    const speedScale = 60 / PRIVATE_SCALE;
-
-    let hSpeed = wave.minSpeed + Math.random() * (wave.maxSpeed - wave.minSpeed);
-    let vSpeed = wave.minVerticalSpeed + Math.random() * (wave.maxVerticalSpeed - wave.minVerticalSpeed);
+    // C++ generic_level_enemy.txt:245, :1133-1138 (.choose_random_start_speed) —
+    // rolled ONCE here at setup; only the hollow diamonds/circles re-roll it in
+    // .start_movement.
+    const hSpeed = Phaser.Math.Between(wave.minSpeed, wave.maxSpeed);
+    const vSpeed = Phaser.Math.Between(wave.minVerticalSpeed, wave.maxVerticalSpeed);
 
     let gravity = wave.gravity;
     if (wave.minGravity !== wave.maxGravity) {
-      gravity = wave.minGravity + Math.random() * (wave.maxGravity - wave.minGravity);
+      gravity = Phaser.Math.Between(wave.minGravity, wave.maxGravity);
     }
 
-    // C++ start_movement (generic_level_enemy.txt:895-904): each enemy initially
-    // heads TOWARD the player (if the ball is to its left, it goes left) rather
-    // than a random direction.
-    const towardPlayer = (this.playerRef && this.playerRef.x < x) ? -1 : 1;
+    // C++ :252-282 — the vertical placement flag decides the sign of the
+    // acceleration (and, for the BOTTOM case, flips the starting vertical speed).
+    let startingYAcc = 0;
+    let startingYVel = vSpeed;
+    switch (wave.verticalPlacement) {
+      case VERTICAL_BOUNCE_FLOOR:
+        startingYAcc = gravity;
+        break;
+      case VERTICAL_BOUNCE_ROOF:
+        startingYAcc = -gravity;
+        break;
+      case VERTICAL_POSITION_BOTTOM:
+        startingYVel = -vSpeed;
+        break;
+      default:
+        break;
+    }
 
     const data: EnemyData = {
       enemyType: wave.type,
       waveConfig: wave,
-      xVelFixed: towardPlayer * hSpeed,
+      xVelFixed: 0,
       yVelFixed: 0,
-      gravityFixed: gravity,
+      gravityFixed: 0,
       behaviourState: BEHAVIOUR_STATE_PAUSED,
       behaviourCounter: 0,
       storedVerticalSpeed: 0,
@@ -596,32 +830,28 @@ export default class EnemySystem {
       bulletSpeedPercentage: wave.bulletSpeedPercentage,
       skipFirstShot: true,
       directionMultiplier: 1,
-      patrolStartX: x,
-      patrolStartY: y,
+      lifecycle: LIFECYCLE_WAIT_OFF_SCREEN,
+      startingWorldX: x,
+      startingWorldY: y,
+      startingXVel: hSpeed,
+      startingYVel,
+      startingYAcc,
       specialPath: null,
       pathPercentage: 0,
       pathPercentageSpeed: 0,
       pathSection: -1,
       baseWorldX: x,
       baseWorldY: y,
-      startY: y,
-      bounceFromFloor: true,
     };
 
     switch (wave.type) {
       case EnemyType.HOLLOW_DIAMONDS:
       case EnemyType.HOLLOW_CIRCLES:
-        data.yVelFixed = (Math.random() > 0.5 ? 1 : -1) * vSpeed;
-        data.gravityFixed = 0;
+        // :852 / :855 — the vertical direction is randomised in .start_movement.
+        data.startingYVel = (Math.random() < 0.5 ? -1 : 1) * vSpeed;
         break;
 
       case EnemyType.PAINT_BUBBLES: {
-        data.yVelFixed = 0;
-        // Middle bubbles wobble with NO gravity (the updatePaintBubbleBehaviour
-        // wobble branch keys off gravityFixed === 0); edge bubbles keep gravity.
-        if (wave.paintVariant === 'middle') {
-          data.gravityFixed = 0;
-        }
         // Tint the bubble its paint colour and remember it so the dropped
         // paintdrop matches (C++ paintdrop inherits paint_bubble_colour_flag).
         const pc = wave.paintColor ?? 0;
@@ -630,43 +860,145 @@ export default class EnemySystem {
         break;
       }
 
-      case EnemyType.CRABBY_BOUNCERS:
-      case EnemyType.MOLECULE_BOUNCERS:
-        data.yVelFixed = 0;
+      case EnemyType.SOLID_DIAMONDS_DEVIANT:
+        data.startingYVel = (Math.random() < 0.5 ? -1 : 1) * vSpeed;
         break;
 
-      case EnemyType.BONUS_MOLECULE:
-        // Stationary pearl-dropper: no velocity, no gravity (animates in place).
-        data.xVelFixed = 0;
-        data.yVelFixed = 0;
-        data.gravityFixed = 0;
+      case EnemyType.SOLID_DIAMONDS:
+        // C++ :193-198 — solid diamonds follow a parametric path, not velocity.
+        data.specialPath = new SpecialPath(SOLID_DIAMOND_SPECIAL_PATH);
+        data.pathPercentageSpeed = SOLID_DIAMOND_PERCENTAGE_SPEED;
+        // C++ spawn_solid_diamond_wave.txt:97-100 anchors the path base Y to a
+        // FIXED SOLID_DIAMOND_START_DISTANCE (224, top), not the spawn-slot Y, so
+        // diamonds always ride at the correct height regardless of spawn box.
+        data.baseWorldY = SOLID_DIAMOND_START_DISTANCE;
+        // Solid diamonds don't collide with world bounds - path controls position
+        body.setCollideWorldBounds(false);
+        body.setAllowGravity(false);
         break;
 
-      case EnemyType.BOBBLE_HATS:
-        data.yVelFixed = 0;
-        // C++ bobble hats: spawn near floor or ceiling, gravity-based bounce
-        data.gravityFixed = BOBBLE_HAT_GRAVITY;
-        data.startY = BOBBLE_HAT_START_DISTANCE;
-        data.bounceFromFloor = Math.random() > 0.5;
-        if (data.bounceFromFloor) {
-          data.baseWorldY = LEVEL_HEIGHT - BOBBLE_HAT_START_DISTANCE;
-        } else {
-          data.baseWorldY = BOBBLE_HAT_START_DISTANCE;
-          data.gravityFixed = -BOBBLE_HAT_GRAVITY;
-        }
-        data.firingCooldown = BOBBLE_HAT_INITIAL_FIRING_DELAY;
+      case EnemyType.FUZZ:
+        // C++ :205-215 — fuzz follows a special path (randomly chosen A or B).
+        data.specialPath = new SpecialPath(
+          Math.random() > 0.5 ? FUZZ_TYPE_A_SPECIAL_PATH : FUZZ_TYPE_B_SPECIAL_PATH
+        );
+        data.pathPercentageSpeed = FUZZ_PERCENTAGE_SPEED;
+        data.startingXVel = 0;
+        data.startingYVel = 0;
+        // Fuzz ignores world collision entirely
+        body.setCollideWorldBounds(false);
+        body.setAllowGravity(false);
         break;
 
-      case EnemyType.PLANES:
-        data.storedVerticalSpeed = vSpeed;
-        data.yVelFixed = 0;
-        data.behaviourState = BEHAVIOUR_STATE_HORIZONTAL;
-        data.behaviourCounter = Math.floor(PLANE_BEHAVIOUR_DISTANCE_HORIZONTAL / hSpeed);
+      default:
         break;
+    }
 
+    (enemy as any)._data = data;
+
+    this.enemyGroup.add(enemy);
+    this.enemies.push(enemy);
+
+    // C++ :302-310 — everything below the fuzz starts hidden, non-colliding and
+    // parked at its anchor; only the fuzz drops straight into the main loop.
+    if (wave.type === EnemyType.FUZZ) {
+      data.lifecycle = LIFECYCLE_ACTIVE;
+      body.setVelocity(0, 0);
+    } else {
+      this.enterWaitOffScreen(enemy, data);
+    }
+  }
+
+  // C++ function_normal_enemy_am_i_on_screen.txt — used by enemies to decide when
+  // to wake up and by enemy bullets to decide when to die.
+  private isOnScreen(camCentreX: number, x: number, y: number): boolean {
+    if (y < ON_SCREEN_MIN_Y || y > ON_SCREEN_MAX_Y) {
+      return false;
+    }
+
+    return Math.abs(x - camCentreX) < ON_SCREEN_DISTANCE;
+  }
+
+  // C++ generic_level_enemy.txt:771-833 (.wait_until_off_screen +
+  // .reset_to_base_position_and_wait) — go invisible and non-colliding, dump all
+  // movement and snap back to the anchor we were spawned at. The fuzz is the one
+  // enemy that leaves for good instead of recycling (:775-779).
+  private enterWaitOffScreen(enemy: Phaser.Physics.Arcade.Sprite, data: EnemyData): void {
+    if (data.enemyType === EnemyType.FUZZ) {
+      enemy.destroy();
+      return;
+    }
+
+    const body = enemy.body as Phaser.Physics.Arcade.Body;
+
+    data.lifecycle = LIFECYCLE_WAIT_OFF_SCREEN;
+    data.xVelFixed = 0;
+    data.yVelFixed = 0;
+    data.gravityFixed = 0;
+
+    body.reset(data.startingWorldX, data.startingWorldY);
+    body.setGravityY(0);
+    body.enable = false;
+
+    enemy.setVisible(false);
+    enemy.setScale(1, 1);
+  }
+
+  // C++ generic_level_enemy.txt:837-939 (.start_movement) — runs every time the
+  // enemy comes back on-screen, not just once at spawn.
+  private startMovement(enemy: Phaser.Physics.Arcade.Sprite, data: EnemyData): void {
+    const speedScale = 60 / PRIVATE_SCALE;
+    const body = enemy.body as Phaser.Physics.Arcade.Body;
+    const wave = data.waveConfig;
+
+    data.lifecycle = LIFECYCLE_ACTIVE;
+    body.enable = true;
+    enemy.setVisible(true);
+
+    if (data.enemyType === EnemyType.HOLLOW_DIAMONDS || data.enemyType === EnemyType.HOLLOW_CIRCLES) {
+      // :850-855 + :866-869 — these two re-roll their speed, their vertical
+      // direction and their height within the spawn box on every re-entry.
+      data.startingXVel = Phaser.Math.Between(wave.minSpeed, wave.maxSpeed);
+      data.startingYVel = (Math.random() < 0.5 ? -1 : 1)
+        * Phaser.Math.Between(wave.minVerticalSpeed, wave.maxVerticalSpeed);
+      data.startingWorldY = Phaser.Math.Between(
+        Math.min(wave.minHeight, wave.maxHeight),
+        Math.max(wave.minHeight, wave.maxHeight)
+      );
+    } else if (data.enemyType === EnemyType.PAINT_BUBBLES
+      && wave.verticalPlacement === VERTICAL_POSITION_MIDDLE) {
+      // :856-861 — mid-field bubbles restart their wobble from a fresh height.
+      data.behaviourCounter = 0;
+      data.startingWorldY = Phaser.Math.Between(
+        Math.min(wave.minHeight, wave.maxHeight),
+        Math.max(wave.minHeight, wave.maxHeight)
+      );
+    }
+    // (BONUS_MOLECULE re-rolls too at :870-871, but spawn_molecule_bonus_wave.txt
+    // :125-126 sets its min/max height to its own scattered spawn Y, so it is a
+    // no-op and its cloud position is preserved.)
+
+    body.reset(data.startingWorldX, data.startingWorldY);
+
+    data.xVelFixed = data.startingXVel;
+    data.yVelFixed = data.startingYVel;
+    data.gravityFixed = data.startingYAcc;
+
+    // :893-910 — head TOWARD the player (if the ball is to our left, go left),
+    // then flip the sprite to face the way we're going.
+    if (this.playerRef && this.playerRef.x < data.startingWorldX) {
+      data.xVelFixed = -data.xVelFixed;
+      data.directionMultiplier = -1;
+    } else {
+      data.directionMultiplier = 1;
+    }
+    enemy.setFlipX(data.xVelFixed < 0);
+
+    switch (data.enemyType) {
       case EnemyType.UP_AND_DOWNERS:
+        // :912-919
         data.storedHorizontalSpeed = data.xVelFixed;
-        data.storedVerticalSpeed = (Math.random() > 0.5 ? 1 : -1) * vSpeed;
+        data.storedVerticalSpeed = data.yVelFixed;
         data.xVelFixed = 0;
         data.yVelFixed = 0;
         data.behaviourState = BEHAVIOUR_STATE_PAUSED;
@@ -674,74 +1006,34 @@ export default class EnemySystem {
         data.skipFirstShot = true;
         break;
 
-      case EnemyType.SOLID_DIAMONDS:
-        // C++ solid diamonds follow a special path (parametric datatable)
-        // They don't use velocity-based movement - position is set directly
+      case EnemyType.PLANES:
+        // :920-924
+        data.storedVerticalSpeed = data.yVelFixed;
         data.yVelFixed = 0;
-        data.xVelFixed = 0;
-        data.specialPath = new SpecialPath(SOLID_DIAMOND_SPECIAL_PATH);
-        data.pathPercentage = 0;
-        data.pathPercentageSpeed = SOLID_DIAMOND_PERCENTAGE_SPEED;
-        data.pathSection = -1;
-        data.baseWorldX = x;
-        // C++ spawn_solid_diamond_wave.txt:97-100 anchors the path base Y to a
-        // FIXED SOLID_DIAMOND_START_DISTANCE (224, top), not the spawn-slot Y, so
-        // diamonds always ride at the correct height regardless of spawn box.
-        data.baseWorldY = SOLID_DIAMOND_START_DISTANCE;
-        // C++ start_movement mirrors the path toward the player (the case below
-        // can't, since xVel is 0 here). PATH_CURRENT_OFFSET_X * direction_multiplier.
-        data.directionMultiplier = towardPlayer;
-        // Solid diamonds don't collide with world bounds - path controls position
-        body.setCollideWorldBounds(false);
-        body.setAllowGravity(false);
-        body.setVelocity(0, 0);
-        break;
-
-      case EnemyType.SOLID_DIAMONDS_DEVIANT:
-        data.xVelFixed = 0;
-        data.yVelFixed = (Math.random() > 0.5 ? 1 : -1) * vSpeed;
-        break;
-
-      case EnemyType.FUZZ:
-        // C++ fuzz follows a special path (randomly chosen A or B)
-        data.gravityFixed = 0;
-        data.xVelFixed = 0;
-        data.yVelFixed = 0;
-        data.specialPath = new SpecialPath(
-          Math.random() > 0.5 ? FUZZ_TYPE_A_SPECIAL_PATH : FUZZ_TYPE_B_SPECIAL_PATH
+        data.behaviourState = BEHAVIOUR_STATE_HORIZONTAL;
+        data.behaviourCounter = Math.floor(
+          PLANE_BEHAVIOUR_DISTANCE_HORIZONTAL / Math.max(1, Math.abs(data.xVelFixed))
         );
+        break;
+
+      case EnemyType.SOLID_DIAMONDS:
+        // :925-930 — the path restarts from the top and re-anchors here.
+        data.xVelFixed = 0;
+        data.yVelFixed = 0;
+        data.baseWorldX = data.startingWorldX;
         data.pathPercentage = 0;
-        data.pathPercentageSpeed = FUZZ_PERCENTAGE_SPEED;
         data.pathSection = -1;
-        data.baseWorldX = x;
-        data.baseWorldY = y;
-        // Fuzz ignores world collision entirely
-        body.setCollideWorldBounds(false);
-        body.setAllowGravity(false);
-        body.setVelocity(0, 0);
         break;
 
       default:
         break;
     }
 
-    const phaserVelX = data.xVelFixed * speedScale;
-    const phaserVelY = data.yVelFixed * speedScale;
-    enemy.setVelocity(phaserVelX, phaserVelY);
+    enemy.setVelocity(data.xVelFixed * speedScale, data.yVelFixed * speedScale);
+    body.setGravityY(data.gravityFixed * speedScale);
 
-    if (data.gravityFixed > 0) {
-      body.setGravityY(data.gravityFixed * speedScale);
-    }
-
-    if (data.xVelFixed < 0) {
-      enemy.setFlipX(true);
-      data.directionMultiplier = -1;
-    }
-
-    (enemy as any)._data = data;
-
-    this.enemyGroup.add(enemy);
-    this.enemies.push(enemy);
+    // :937 — restart the firing timer so a re-entering wave doesn't volley at once.
+    data.firingCooldown = wave.firingInitialDelay;
   }
 
   // C++ spawn_fuzz.txt: a single Fuzz enters from the side the player is heading
@@ -756,7 +1048,7 @@ export default class EnemySystem {
     const x = camCentreX + dir * HALF_SCREEN_PLUS_ENTRANCE;
     const y = LEVEL_HEIGHT / 2;
 
-    const wave = this.createWaveConfig(EnemyType.FUZZ, level, 0);
+    const wave = this.createWaveConfig(EnemyType.FUZZ, level, 0, y, y);
     this.spawnEnemyFromWave(x, y, wave, level);
 
     const fuzz = this.enemies[this.enemies.length - 1];
@@ -776,6 +1068,11 @@ export default class EnemySystem {
 
       const data = (enemy as any)._data as EnemyData;
       if (!data) return;
+
+      // Gate everything below on the on/off-screen lifecycle: an enemy that is
+      // waiting to appear (or has just scrolled away) runs no behaviour and,
+      // crucially, no firing — so it can't eat the shared 24-bullet pool.
+      if (!this.updateLifecycle(enemy, data)) return;
 
       const body = enemy.body as Phaser.Physics.Arcade.Body;
 
@@ -805,7 +1102,7 @@ export default class EnemySystem {
           this.updateHollowCircleBehaviour(enemy, data, body, speedScale);
           break;
         case EnemyType.MOLECULE_BOUNCERS:
-          this.updateBasicBounce(enemy, data, body, speedScale);
+          this.updateMoleculeBouncerBehaviour(enemy, data, body, speedScale);
           break;
         case EnemyType.SOLID_DIAMONDS:
           this.updateSolidDiamondBehaviour(enemy, data);
@@ -826,6 +1123,45 @@ export default class EnemySystem {
     });
 
     this.cleanupBullets();
+  }
+
+  // C++ generic_level_enemy.txt:302-325 + :771-811 — the on/off-screen lifecycle.
+  // Every enemy but the fuzz spawns invisible and non-colliding, waits until it is
+  // genuinely off-screen (>= 368 px from the camera centre), then waits to come
+  // back on-screen (< 344 px) before it starts moving. The main loop re-tests
+  // every frame and recycles the enemy back to its anchor when it scrolls away,
+  // which is what stops all ~60 of a level's enemies being live at once.
+  // Waiting enemies are still ALIVE for the level's enemy count, exactly as in the
+  // C++ (function_add_enemy_to_level_count runs at spawn, and only a kill removes
+  // them), so getActiveEnemyCount()/maybeSpawnReplacementWave() are unaffected.
+  // Returns true when the enemy should run its behaviour and firing this frame.
+  private updateLifecycle(enemy: Phaser.Physics.Arcade.Sprite, data: EnemyData): boolean {
+    const cam = this.scene.cameras.main;
+    const camCentreX = cam.scrollX + cam.width / 2;
+
+    switch (data.lifecycle) {
+      case LIFECYCLE_WAIT_OFF_SCREEN:
+        // :785-789
+        if (!this.isOnScreen(camCentreX, enemy.x, enemy.y)) {
+          data.lifecycle = LIFECYCLE_WAIT_ON_SCREEN;
+        }
+        return false;
+
+      case LIFECYCLE_WAIT_ON_SCREEN:
+        // :804-809
+        if (this.isOnScreen(camCentreX, enemy.x, enemy.y)) {
+          this.startMovement(enemy, data);
+        }
+        return false;
+
+      default:
+        // :321-325 — off we go again (for the fuzz, this is where it dies).
+        if (Math.abs(enemy.x - camCentreX) >= OFF_SCREEN_DISTANCE) {
+          this.enterWaitOffScreen(enemy, data);
+          return false;
+        }
+        return true;
+    }
   }
 
   private updatePlaneBehaviour(
@@ -890,9 +1226,12 @@ export default class EnemySystem {
         data.yVelFixed = data.storedVerticalSpeed;
         enemy.setVelocity(0, data.yVelFixed * speedScale);
 
+        // C++ generic_level_enemy.txt:344-350 — this explicit shot is the ONLY
+        // one an up-and-downer ever fires (its firing behaviour carries no
+        // frequency bit, so .fire_shots is a no-op for it).
         if (data.firingBehaviour !== BULLET_TYPE_NONE) {
           if (!data.skipFirstShot) {
-            this.fireBulletAtPlayer(enemy, data);
+            this.fireShot(enemy, data);
           } else {
             data.skipFirstShot = false;
           }
@@ -1001,20 +1340,65 @@ export default class EnemySystem {
 
       enemy.setPosition(worldX, worldY);
     } else {
-      // Exit: straight-line velocity (C++ uses direction_multiplier * 5376)
+      // Exit: straight-line velocity (C++ uses direction_multiplier * 5376).
+      // Once it passes OFF_SCREEN_DISTANCE the shared lifecycle gate destroys it
+      // (C++ generic_level_enemy.txt:321-325 + :775-779): without that it would
+      // fly off forever with collideWorldBounds disabled, the active enemy count
+      // would never reach zero and the level would run out of paint bubbles.
       const exitVelX = data.directionMultiplier * FUZZ_EXIT_SPEED * speedScale;
       enemy.setVelocity(exitVelX, 0);
-
-      // C++ generic_level_enemy.txt:321-325 + 775-779 — once the Fuzz leaves the
-      // screen it removes itself from the level count and kills itself. Without
-      // this it flies off forever with collideWorldBounds disabled, so the active
-      // enemy count never reaches zero, maybeSpawnReplacementWave() never fires
-      // again, and the level runs out of paint bubbles permanently.
-      const camCentreX = this.scene.cameras.main.scrollX + this.scene.cameras.main.width / 2;
-      if (Math.abs(enemy.x - camCentreX) >= OFF_SCREEN_DISTANCE) {
-        enemy.destroy();
-      }
     }
+  }
+
+  // C++ generic_level_enemy.txt:943-990 (.bounce_vertically_by_set_power) — on a
+  // vertical world hit the gravity bouncers recompute their outgoing speed from
+  // s = (a * t^2) / 2 so they always come back to exactly their start height.
+  // The roof variants (:970-987) mirror it: they are pulled UP and bounce DOWN.
+  private bounceVerticallyBySetPower(
+    enemy: Phaser.Physics.Arcade.Sprite,
+    data: EnemyData,
+    body: Phaser.Physics.Arcade.Body,
+    speedScale: number
+  ): void {
+    const gravity = Math.abs(data.gravityFixed);
+    if (gravity === 0) return;
+
+    if (data.waveConfig.verticalPlacement === VERTICAL_BOUNCE_FLOOR) {
+      if (!body.blocked.down) return;
+
+      const s = Math.abs(enemy.y - data.startingWorldY) * 2;
+      const t = Math.sqrt(s / gravity);
+      data.yVelFixed = Math.min(-(gravity * t), -MINIMUM_BOUNCE_SPEED);
+    } else if (data.waveConfig.verticalPlacement === VERTICAL_BOUNCE_ROOF) {
+      if (!body.blocked.up) return;
+
+      const s = Math.abs(data.startingWorldY - enemy.y) * 2;
+      const t = Math.sqrt(s / gravity);
+      data.yVelFixed = Math.max(gravity * t, MINIMUM_BOUNCE_SPEED);
+    } else {
+      return;
+    }
+
+    enemy.setVelocityY(data.yVelFixed * speedScale);
+  }
+
+  // C++ generic_level_enemy.txt:666-668 / :720-722 — molecule bouncers just bounce:
+  // a horizontal hit flips them, a vertical hit goes through the set-power bounce.
+  private updateMoleculeBouncerBehaviour(
+    enemy: Phaser.Physics.Arcade.Sprite,
+    data: EnemyData,
+    body: Phaser.Physics.Arcade.Body,
+    speedScale: number
+  ): void {
+    if (body.blocked.left) {
+      data.xVelFixed = Math.abs(data.xVelFixed);
+      enemy.setVelocityX(data.xVelFixed * speedScale);
+    } else if (body.blocked.right) {
+      data.xVelFixed = -Math.abs(data.xVelFixed);
+      enemy.setVelocityX(data.xVelFixed * speedScale);
+    }
+
+    this.bounceVerticallyBySetPower(enemy, data, body, speedScale);
   }
 
   private updateCrabbyBehaviour(
@@ -1030,6 +1414,10 @@ export default class EnemySystem {
       data.xVelFixed = -Math.abs(data.xVelFixed);
       enemy.setVelocityX(data.xVelFixed * speedScale);
     }
+
+    // C++ generic_level_enemy.txt:712-718 — crabbies use the set-power bounce too,
+    // so roof crabbies bounce along the ceiling instead of falling.
+    this.bounceVerticallyBySetPower(enemy, data, body, speedScale);
 
     // C++ squash/stretch deformation on bounce
     // opengl_scale_x = 10000 + deform_amount * sin(deform_angle)
@@ -1079,41 +1467,9 @@ export default class EnemySystem {
     body: Phaser.Physics.Arcade.Body,
     speedScale: number
   ): void {
-    // C++ bounce_vertically_by_set_power formula:
-    // Uses s = (a * t^2) / 2  =>  t = sqrt(2s/a)
-    // Then y_vel = a * t * direction
-    // This gives a physics-accurate bounce that returns to the start height
-
-    if (data.bounceFromFloor) {
-      if (body.blocked.down) {
-        // Calculate bounce velocity from distance fallen
-        const dist = Math.abs(enemy.y - data.baseWorldY);
-        const gravity = Math.abs(data.gravityFixed);
-        if (gravity > 0 && dist > 0) {
-          const s = dist * 2;
-          const a = gravity;
-          const t = Math.sqrt(s / a);
-          const bounceVel = -(a * t);
-          // Ensure minimum bounce
-          data.yVelFixed = Math.min(bounceVel, -768);
-          enemy.setVelocityY(data.yVelFixed * speedScale);
-        }
-      }
-    } else {
-      if (body.blocked.up) {
-        // Bouncing from ceiling
-        const dist = Math.abs(data.baseWorldY - enemy.y);
-        const gravity = Math.abs(data.gravityFixed);
-        if (gravity > 0 && dist > 0) {
-          const s = dist * 2;
-          const a = gravity;
-          const t = Math.sqrt(s / a);
-          const bounceVel = a * t;
-          data.yVelFixed = Math.max(bounceVel, 768);
-          enemy.setVelocityY(data.yVelFixed * speedScale);
-        }
-      }
-    }
+    // C++ generic_level_enemy.txt:732-734 — bobble hats bounce off floor OR roof
+    // depending on the wave's placement flag.
+    this.bounceVerticallyBySetPower(enemy, data, body, speedScale);
 
     // Bounce off walls horizontally
     if (body.blocked.left) {
@@ -1205,45 +1561,29 @@ export default class EnemySystem {
     body: Phaser.Physics.Arcade.Body,
     speedScale: number
   ): void {
-    // C++ paint bubbles have two variants:
-    // Middle position: circular wobble (sin/cos pattern)
-    // Top/bottom: gravity bounce with squash/stretch
-    // Since we don't track spawn position variant, use gravity bounce
-    // but add the C++ middle deviation wobble for variety
-    if (data.gravityFixed > 0) {
-      // Gravity-based bounce (standard paint bubble)
-      if (body.blocked.left) {
-        data.xVelFixed = Math.abs(data.xVelFixed);
-        enemy.setVelocityX(data.xVelFixed * speedScale);
-      } else if (body.blocked.right) {
-        data.xVelFixed = -Math.abs(data.xVelFixed);
-        enemy.setVelocityX(data.xVelFixed * speedScale);
-      }
-      if (body.blocked.down) {
-        // C++ bounce: recalculate y_vel from energy conservation
-        const startY = 48; // approximate top start Y
-        const dist = Math.abs(enemy.y - startY);
-        const s = dist * 2;
-        const a = data.gravityFixed;
-        if (a > 0 && s > 0) {
-          const t = Math.sqrt(s / a);
-          data.yVelFixed = -Math.trunc(a * t);
-          const minBounce = 768;
-          if (Math.abs(data.yVelFixed) < minBounce) {
-            data.yVelFixed = -minBounce;
-          }
-          enemy.setVelocityY(data.yVelFixed * speedScale);
-        }
-      }
-    } else {
-      // Middle variant: circular wobble. C++ generic_level_enemy.txt:524-527 —
-      // x_vel = 768·sin(angle)·dir, y_vel = -768·cos(angle), angle += 250.
+    // C++ generic_level_enemy.txt:522-545 — paint bubbles come in two flavours,
+    // picked by the wave's top_or_bottom_flag: the mid-field ones do a circular
+    // wobble, the roof/floor ones gravity-bounce (with squash/stretch).
+    if (data.waveConfig.verticalPlacement === VERTICAL_POSITION_MIDDLE) {
+      // :523-528 — x_vel = 768·sin(angle)·dir, y_vel = -768·cos(angle), += 250.
       data.behaviourCounter = (data.behaviourCounter + 250) % 36000;
       const angle = (data.behaviourCounter / 36000) * Math.PI * 2;
       data.xVelFixed = Math.sin(angle) * 768 * data.directionMultiplier;
       data.yVelFixed = -Math.cos(angle) * 768;
       enemy.setVelocity(data.xVelFixed * speedScale, data.yVelFixed * speedScale);
+      return;
     }
+
+    if (body.blocked.left) {
+      data.xVelFixed = Math.abs(data.xVelFixed);
+      enemy.setVelocityX(data.xVelFixed * speedScale);
+    } else if (body.blocked.right) {
+      data.xVelFixed = -Math.abs(data.xVelFixed);
+      enemy.setVelocityX(data.xVelFixed * speedScale);
+    }
+
+    // :700-706 — the set-power bounce, from whichever surface this wave uses.
+    this.bounceVerticallyBySetPower(enemy, data, body, speedScale);
   }
 
   private updateBasicBounce(
@@ -1268,58 +1608,63 @@ export default class EnemySystem {
     }
   }
 
+  // C++ generic_level_enemy.txt:997-1030 (.fire_shots) — note that an enemy with
+  // NEITHER frequency bit set never fires on a timer at all (that is the case for
+  // the up-and-downers, whose only shot is the explicit one they take at the
+  // paused->vertical transition). The bullet cap is deliberately NOT tested here:
+  // it lives in the bullet itself (enemy_bullet.txt:24-30), so a saturated pool
+  // must not stall every enemy's timer and make them all volley on one frame.
   private updateFiring(enemy: Phaser.Physics.Arcade.Sprite, data: EnemyData): void {
     if (data.firingBehaviour === BULLET_TYPE_NONE) return;
-    if (!this.playerRef || !this.playerRef.active) return;
-    if (this.enemyBulletCount >= MAX_ENEMY_BULLETS) return;
 
-    // C++ firing frequency logic:
-    // BULLET_FREQUENCY_RANDOM: SPECIAL_RAND(0, firingFrequency) - fires when result is 0
-    // BULLET_FREQUENCY_FIXED: countdown timer, fires when reaches 0
-    if ((data.firingBehaviour & BULLET_FREQUENCY_FIXED) !== 0) {
-      data.firingCooldown--;
+    if ((data.firingBehaviour & BULLET_FREQUENCY_RANDOM) !== 0) {
+      // :1002-1010 — 1-in-frequency chance per frame.
+      if (Phaser.Math.Between(0, Math.max(1, data.firingFrequency)) !== 0) return;
+    } else if ((data.firingBehaviour & BULLET_FREQUENCY_FIXED) !== 0) {
+      // :1012-1022 — countdown, clamped at zero, reloaded on fire.
+      data.firingCooldown = Math.max(0, data.firingCooldown - 1);
       if (data.firingCooldown > 0) return;
       data.firingCooldown = data.firingFrequency;
     } else {
-      // Random frequency: C++ fires when SPECIAL_RAND(0, freq) == 0
-      // This gives a 1/freq chance per frame
-      if (Math.floor(Math.random() * data.firingFrequency) !== 0) return;
+      return;
     }
 
-    // C++ bullet speed modifier: (10000 / CONST_NUMBER_OF_LEVELS_MINUS_ONE) * player_level % bulletSpeedPercentage
-    // CONST_NUMBER_OF_LEVELS_MINUS_ONE = 7
-    const levelSpeedMod = Math.floor((10000 / 7) * this.currentLevel) % data.bulletSpeedPercentage;
+    this.fireShot(enemy, data);
+  }
+
+  // C++ generic_level_enemy.txt:1034-1046 (.fire_shot)
+  private fireShot(enemy: Phaser.Physics.Arcade.Sprite, data: EnemyData): void {
+    const bulletSpeedPxSec = this.enemyBulletSpeedPxSec(data);
+
+    if ((data.firingBehaviour & BULLET_TYPE_SINGLE_DIRECTED) !== 0) {
+      this.fireDirectedBullet(enemy, bulletSpeedPxSec);
+    } else if ((data.firingBehaviour & BULLET_TYPE_SPREAD) !== 0) {
+      this.fireSpreadBullets(enemy, bulletSpeedPxSec);
+    }
+  }
+
+  // C++ generic_level_enemy.txt:1107-1111 — bullet_speed_modifier =
+  // (10000 / 7) * player_on_level_number, then scaled by the enemy's bullet-speed
+  // PERCENTAGE. The engine's "%" is a fixed-point multiply by a 10000-based
+  // percentage (see :1089, "speed % 7071" = the diagonal 70.71%), not a remainder.
+  private enemyBulletSpeedPxSec(data: EnemyData): number {
+    const levelIndex = Math.max(0, this.currentLevel - 1);
+    const baseModifier = Math.floor(10000 / CONST_NUMBER_OF_LEVELS_MINUS_ONE) * levelIndex;
+    const levelSpeedMod = Math.floor((baseModifier * data.bulletSpeedPercentage) / 10000);
+
     const bulletSpeedFixed = Phaser.Math.Linear(
       MINIMUM_ENEMY_BULLET_SPEED,
       MAXIMUM_ENEMY_BULLET_SPEED,
       levelSpeedMod / 10000
     );
-    const bulletSpeedPxSec = (bulletSpeedFixed / PRIVATE_SCALE) * 60;
 
-    if ((data.firingBehaviour & BULLET_TYPE_SPREAD) !== 0) {
-      this.fireSpreadBullets(enemy, bulletSpeedPxSec);
-    } else if ((data.firingBehaviour & BULLET_TYPE_SINGLE_DIRECTED) !== 0) {
-      this.fireDirectedBullet(enemy, bulletSpeedPxSec);
-    }
+    return (bulletSpeedFixed / PRIVATE_SCALE) * 60;
   }
 
-  private fireBulletAtPlayer(enemy: Phaser.Physics.Arcade.Sprite, data: EnemyData): void {
-    const bulletSpeedFixed = Phaser.Math.Linear(
-      MINIMUM_ENEMY_BULLET_SPEED,
-      MAXIMUM_ENEMY_BULLET_SPEED,
-      data.bulletSpeedPercentage / 10000
-    );
-    const bulletSpeedPxSec = (bulletSpeedFixed / PRIVATE_SCALE) * 60;
-
-    if ((data.firingBehaviour & BULLET_TYPE_SPREAD) !== 0) {
-      this.fireSpreadBullets(enemy, bulletSpeedPxSec);
-    } else if ((data.firingBehaviour & BULLET_TYPE_SINGLE_DIRECTED) !== 0) {
-      this.fireDirectedBullet(enemy, bulletSpeedPxSec);
-    }
-  }
-
+  // C++ generic_level_enemy.txt:1096-1114 — only the DIRECTED shot needs a live
+  // player (it aims at wizball_entity_id); the spread fires regardless.
   private fireDirectedBullet(enemy: Phaser.Physics.Arcade.Sprite, speedPxSec: number): void {
-    if (!this.playerRef) return;
+    if (!this.playerRef || !this.playerRef.active) return;
 
     const dx = this.playerRef.x - enemy.x;
     const dy = this.playerRef.y - enemy.y;
@@ -1374,22 +1719,18 @@ export default class EnemySystem {
     (bullet as any)._isEnemyBullet = true;
     this.enemyBulletGroup.add(bullet);
     this.enemyBulletCount++;
-
-    this.scene.time.delayedCall(3000, () => {
-      if (bullet.active) {
-        this.releaseEnemyBullet(bullet);
-      }
-    });
   }
 
+  // C++ enemy_bullet.txt:88-93 — a bullet dies the instant it is not on-screen
+  // (the same test the enemies use), not on a timer, and not against the world
+  // rect: a bullet that leaves the VIEWPORT is gone even mid-level.
   private cleanupBullets(): void {
-    const bounds = this.scene.cameras.main.getBounds();
-    const padding = 100;
+    const cam = this.scene.cameras.main;
+    const camCentreX = cam.scrollX + cam.width / 2;
 
     this.enemyBulletGroup.children.each((child: Phaser.GameObjects.GameObject) => {
       const bullet = child as Phaser.Physics.Arcade.Sprite;
-      if (bullet.x < bounds.x - padding || bullet.x > bounds.right + padding ||
-          bullet.y < bounds.y - padding || bullet.y > bounds.bottom + padding) {
+      if (bullet.active && !this.isOnScreen(camCentreX, bullet.x, bullet.y)) {
         this.releaseEnemyBullet(bullet);
       }
       return true;
@@ -1440,6 +1781,11 @@ export default class EnemySystem {
 
     for (const enemy of this.enemies) {
       if (!enemy.active) continue;
+      // Skip enemies that are still waiting to appear — in the C++ they have
+      // COLLIDE_TYPE = 0 (generic_level_enemy.txt:819-820), so the mutant cat
+      // can't see them, let alone hunt one that is invisible.
+      const enemyData = (enemy as any)._data as EnemyData | undefined;
+      if (enemyData && enemyData.lifecycle !== LIFECYCLE_ACTIVE) continue;
 
       const dx = enemy.x - x;
       const dy = enemy.y - y;

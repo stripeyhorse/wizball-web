@@ -1,11 +1,70 @@
-import type { ActionName, GameSettings, GraphicsSettings, KeyBinding } from '../types/settings';
+import type {
+  ActionName, GameSettings, KeyBinding, TouchControlsMode,
+} from '../types/settings';
+import { CRT_MODES, TOUCH_CONTROL_MODES } from '../types/settings';
 import { DEFAULT_SETTINGS, SETTINGS_VERSION } from './DefaultSettings';
 
 const STORAGE_KEY = 'wizball_settings';
 
+// The background-music tracks (source of truth: MUSIC_URLS in
+// src/systems/MusicManager.ts — kept as a local copy so config/ does not have to
+// import systems/, which would make an import cycle once MusicManager asks this
+// module for its gain). Everything else in the audio cache is a one-shot SFX.
+//
+// Music currently streams through a bare <audio> element outside Phaser's sound
+// manager, so this routing is a safety net for any music key that does go
+// through `sound.add()`; the live music level comes from musicGain() below.
+const MUSIC_KEYS = new Set([
+  'wizball_title',
+  'wizball_in_game',
+  'wizball_laboratory',
+  'wizball_bonus',
+  'wizball_pre_life',
+  'wizball_completion',
+  'wizball_game_over',
+  'wizball_hi_score',
+]);
+
+type Bus = 'music' | 'sfx';
+
+// Bookkeeping stashed on each Sound so a later volume change can be re-applied
+// to something already playing. `config`/`volume` live on the concrete Sound
+// classes (WebAudioSound / HTML5AudioSound), not on the BaseSound type.
+interface BusSound extends Phaser.Sound.BaseSound {
+  config?: Phaser.Types.Sound.SoundConfig;
+  volume?: number;
+  __wizBus?: Bus;
+  __wizBase?: number;
+}
+
+// Likewise `sounds` is declared on the concrete managers. NoAudioSoundManager
+// has no list at all, hence the optional — applyAudio() checks before iterating.
+interface BusSoundManager extends Phaser.Sound.BaseSoundManager {
+  sounds?: Phaser.Sound.BaseSound[];
+}
+
+// Copy only keys that exist in the defaults AND whose stored value has the same
+// primitive type. A corrupt or hand-edited blob can therefore add junk keys, or
+// swap a number for a string, without any of it reaching the running game.
+function mergeFlat<T extends object>(target: T, saved: unknown): void {
+  if (!saved || typeof saved !== 'object') return;
+  const src = saved as Record<string, unknown>;
+  for (const key of Object.keys(target) as (keyof T & string)[]) {
+    const value = src[key];
+    if (value !== undefined && typeof value === typeof target[key]) {
+      (target as Record<string, unknown>)[key] = value;
+    }
+  }
+}
+
+function clamp(n: number, lo: number, hi: number, fallback: number): number {
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback;
+}
+
 export class Settings {
   private static instance: Settings;
   private settings: GameSettings;
+  private audioHooked = false;
 
   private constructor() {
     this.settings = structuredClone(DEFAULT_SETTINGS);
@@ -22,9 +81,10 @@ export class Settings {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return;
-      const parsed = JSON.parse(raw) as GameSettings;
-      if (parsed.version !== SETTINGS_VERSION) return;
-      this.settings = this.merge(DEFAULT_SETTINGS, parsed);
+      const parsed = JSON.parse(raw) as Partial<GameSettings> | null;
+      if (!parsed || typeof parsed !== 'object') return;
+      if (parsed.version !== SETTINGS_VERSION) return; // older/newer shape — start clean
+      this.settings = this.merge(parsed);
     } catch {
       // localStorage unavailable or corrupt — use defaults
     }
@@ -43,63 +103,182 @@ export class Settings {
   }
 
   update(partial: Partial<GameSettings>): void {
-    if (partial.graphics) {
-      Object.assign(this.settings.graphics, partial.graphics);
-    }
-    if (partial.bindings) {
-      Object.assign(this.settings.bindings, partial.bindings);
-    }
-    if (partial.gamepad) {
-      Object.assign(this.settings.gamepad, partial.gamepad);
-    }
+    if (partial.graphics) Object.assign(this.settings.graphics, partial.graphics);
+    if (partial.audio) Object.assign(this.settings.audio, partial.audio);
+    if (partial.ui) Object.assign(this.settings.ui, partial.ui);
+    if (partial.bindings) Object.assign(this.settings.bindings, partial.bindings);
+    if (partial.gamepad) Object.assign(this.settings.gamepad, partial.gamepad);
     this.save();
-  }
-
-  applyGraphics(game: Phaser.Game): void {
-    const g = this.settings.graphics;
-    const baseW = 640;
-    const baseH = 416;
-
-    // Resolution scale
-    game.scale.setGameSize(baseW * g.resolutionScale, baseH * g.resolutionScale);
-
-    // Fullscreen
-    if (g.fullscreen && !game.scale.isFullscreen) {
-      game.scale.startFullscreen();
-    } else if (!g.fullscreen && game.scale.isFullscreen) {
-      game.scale.stopFullscreen();
-    }
   }
 
   getPixelArt(): boolean {
     return !this.settings.graphics.pixelArtSmoothing;
   }
 
-  private merge(defaults: GameSettings, saved: GameSettings): GameSettings {
-    const result = structuredClone(defaults);
+  // ---- Applying settings to the live game -----------------------------------
 
-    // Merge graphics
-    for (const key of Object.keys(defaults.graphics) as (keyof GraphicsSettings)[]) {
-      if (key in saved.graphics) {
-        (result.graphics as any)[key] = saved.graphics[key];
+  /** Everything that is safe to (re)apply outside a user gesture. */
+  apply(game: Phaser.Game): void {
+    this.applyAudio(game);
+    this.applyTouchControls();
+  }
+
+  /**
+   * Install the music/SFX volume buses on Phaser's sound manager.
+   *
+   * Phaser only has a single global volume, so master + mute go straight onto
+   * the sound manager and the two buses are applied per sound instead: `add()`
+   * scales the requested volume, and `play(key, { volume })` — the shortcut most
+   * SFX use — gets the same treatment. Doing it here means no scene has to know
+   * a mixer exists. Call once, after the game has booted (game.sound is created
+   * during boot, so Phaser.Core.Events.READY is the earliest safe point).
+   */
+  attachAudio(game: Phaser.Game): void {
+    const mgr = game.sound as Phaser.Sound.BaseSoundManager | undefined;
+    if (!mgr || this.audioHooked) return;
+    this.audioHooked = true;
+
+    const originalAdd = mgr.add.bind(mgr);
+    mgr.add = (key: string, config?: Phaser.Types.Sound.SoundConfig): Phaser.Sound.BaseSound => {
+      const bus: Bus = MUSIC_KEYS.has(key) ? 'music' : 'sfx';
+      const base = config?.volume ?? 1;
+      // Scale the config object Phaser keeps as `sound.config`: BaseSound.play()
+      // resets currentConfig back to it, so scaling here survives every replay.
+      const sound = originalAdd(key, { ...config, volume: base * this.busVolume(bus) }) as BusSound;
+      sound.__wizBus = bus;
+      sound.__wizBase = base;
+      return sound;
+    };
+
+    const originalPlay = mgr.play.bind(mgr);
+    mgr.play = (key: string, extra?: Phaser.Types.Sound.SoundConfig | Phaser.Types.Sound.SoundMarker): boolean => {
+      const gain = this.busVolume(MUSIC_KEYS.has(key) ? 'music' : 'sfx');
+      if (extra && typeof extra === 'object') {
+        if ('config' in extra && extra.config) {
+          const marker = extra as Phaser.Types.Sound.SoundMarker;
+          extra = { ...marker, config: { ...marker.config, volume: (marker.config?.volume ?? 1) * gain } };
+        } else {
+          const cfg = extra as Phaser.Types.Sound.SoundConfig;
+          extra = { ...cfg, volume: (cfg.volume ?? 1) * gain };
+        }
+      }
+      return originalPlay(key, extra);
+    };
+
+    this.applyAudio(game);
+  }
+
+  /** Master volume + mute, and a re-scale of anything already playing. */
+  applyAudio(game: Phaser.Game): void {
+    const mgr = game.sound as BusSoundManager | undefined;
+    if (!mgr) return;
+
+    mgr.mute = this.settings.audio.muted;
+    mgr.volume = this.settings.audio.master;
+
+    for (const sound of (mgr.sounds ?? []) as BusSound[]) {
+      if (!sound.__wizBus) continue;
+      const level = (sound.__wizBase ?? 1) * this.busVolume(sound.__wizBus);
+      if (sound.config) sound.config.volume = level;
+      sound.volume = level;
+    }
+
+    // Mirror the music bus onto a global so anything that cannot import this
+    // module (or must avoid the import cycle) can still read it.
+    (window as unknown as { __wizMusicGain?: number }).__wizMusicGain = this.musicGain();
+  }
+
+  /**
+   * The factor background music should multiply its own track volume by.
+   *
+   * MusicManager streams the soundtrack through a bare <audio> element so the
+   * eight MP3s are never decoded into RAM (src/systems/MusicManager.ts) — that
+   * element is invisible to Phaser's sound manager, so master/mute cannot reach
+   * it automatically. It has to ask for this value on play and re-apply it when
+   * the game emits 'settings:changed'.
+   */
+  musicGain(): number {
+    const a = this.settings.audio;
+    return a.muted ? 0 : a.master * a.music;
+  }
+
+  /** Show/hide the index.html on-screen touch overlay. */
+  applyTouchControls(): void {
+    this.touchUI()?.setMode(this.settings.ui.touchControls);
+  }
+
+  /**
+   * Stow the touch overlay while a full-screen menu owns the display. The D-pad
+   * and FIRE do nothing in a menu and they sit on top of it, so leaving them up
+   * just invites taps that go nowhere. Does not change the stored preference.
+   */
+  setTouchOverlayHidden(hidden: boolean): void {
+    this.touchUI()?.setHidden(hidden);
+  }
+
+  private touchUI() {
+    return (window as unknown as {
+      __wizTouchUI?: {
+        setMode(mode: TouchControlsMode): void;
+        setHidden(hidden: boolean): void;
+      };
+    }).__wizTouchUI;
+  }
+
+  /**
+   * Toggle fullscreen. MUST be called from inside a real user-gesture handler
+   * (a pointerdown/keydown listener). Browsers reject requestFullscreen() from
+   * a requestAnimationFrame tick and Phaser swallows the rejection — which is
+   * why driving this from a scene's update() silently did nothing.
+   */
+  toggleFullscreen(game: Phaser.Game): void {
+    if (game.scale.isFullscreen) {
+      game.scale.stopFullscreen();
+    } else {
+      game.scale.startFullscreen();
+    }
+  }
+
+  private busVolume(bus: Bus): number {
+    return bus === 'music' ? this.settings.audio.music : this.settings.audio.sfx;
+  }
+
+  // ---- Persistence ----------------------------------------------------------
+
+  private merge(saved: Partial<GameSettings>): GameSettings {
+    const result = structuredClone(DEFAULT_SETTINGS);
+
+    mergeFlat(result.graphics, saved.graphics);
+    mergeFlat(result.audio, saved.audio);
+    mergeFlat(result.ui, saved.ui);
+    mergeFlat(result.gamepad, saved.gamepad);
+
+    const savedBindings = saved.bindings as Partial<Record<ActionName, Partial<KeyBinding>>> | undefined;
+    if (savedBindings && typeof savedBindings === 'object') {
+      for (const action of Object.keys(result.bindings) as ActionName[]) {
+        const b = savedBindings[action];
+        if (!b || typeof b !== 'object') continue;
+        const merged: KeyBinding = { ...result.bindings[action] };
+        if (typeof b.keyboard === 'number' || b.keyboard === null) merged.keyboard = b.keyboard;
+        if (typeof b.gamepadButton === 'number' || b.gamepadButton === null) merged.gamepadButton = b.gamepadButton;
+        result.bindings[action] = merged;
       }
     }
 
-    // Merge bindings
-    for (const action of Object.keys(defaults.bindings) as ActionName[]) {
-      if (saved.bindings[action]) {
-        result.bindings[action] = { ...defaults.bindings[action], ...saved.bindings[action] } as KeyBinding;
-      }
-    }
-
-    // Merge gamepad
-    for (const key of Object.keys(defaults.gamepad) as (keyof typeof defaults.gamepad)[]) {
-      if (key in saved.gamepad) {
-        (result.gamepad as any)[key] = saved.gamepad[key];
-      }
-    }
-
+    this.sanitise(result);
     result.version = SETTINGS_VERSION;
     return result;
+  }
+
+  // Type-correct but out-of-range values (volume: 12, crtMode: 'banana') would
+  // still break things, so every constrained field is re-checked here.
+  private sanitise(s: GameSettings): void {
+    const d = DEFAULT_SETTINGS;
+    s.audio.master = clamp(s.audio.master, 0, 1, d.audio.master);
+    s.audio.music = clamp(s.audio.music, 0, 1, d.audio.music);
+    s.audio.sfx = clamp(s.audio.sfx, 0, 1, d.audio.sfx);
+    s.gamepad.deadzone = clamp(s.gamepad.deadzone, 0, 0.5, d.gamepad.deadzone);
+    if (!CRT_MODES.includes(s.graphics.crtMode)) s.graphics.crtMode = d.graphics.crtMode;
+    if (!TOUCH_CONTROL_MODES.includes(s.ui.touchControls)) s.ui.touchControls = d.ui.touchControls;
   }
 }
