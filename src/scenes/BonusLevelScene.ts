@@ -112,7 +112,7 @@ export default class BonusLevelScene extends Phaser.Scene {
   private level: number = 1;
   private score: number = 0;
   private weaponCollection: number = 0;
-  private lives: number = 3;
+  private lives: number = 2; // C++ WIZBALL_START_LIVES (always overridden by carried lives)
   private levelProgress: number = 0;
   private cauldronFill: number[] = [0, 0, 0, 0];
 
@@ -152,7 +152,7 @@ export default class BonusLevelScene extends Phaser.Scene {
     this.level = data.level ?? 1;
     this.score = data.score ?? 0;
     this.weaponCollection = data.weaponCollection ?? 0;
-    this.lives = data.lives ?? 3;
+    this.lives = data.lives ?? 2;
     this.levelProgress = data.levelProgress ?? 0;
     this.cauldronFill = data.cauldronFill ?? [0, 0, 0, 0];
 
@@ -208,6 +208,11 @@ export default class BonusLevelScene extends Phaser.Scene {
 
     // Player bullet hits enemy -> kill + score.
     this.physics.add.overlap(this.bullets, this.enemies, this.onBulletHitEnemy, undefined, this);
+
+    // C++ bonus_wave_enemy.txt:778-802 — the wizball can ALSO ram enemies dead
+    // for score (the ball is never damaged in the bonus round). The port was
+    // missing this entirely, so you could only shoot, never barge through.
+    this.physics.add.overlap(this.player!, this.enemies, this.onPlayerHitEnemy, undefined, this);
 
     // Enable wave spawning shortly after the scene begins (mirrors the queued
     // LEVEL_RESET_FLAG_MOVE_TO_NEXT_BONUS_WAVE that kicks the sequence off).
@@ -272,10 +277,36 @@ export default class BonusLevelScene extends Phaser.Scene {
 
   private onBulletHitEnemy(bulletObj: any, enemyObj: any): void {
     const bullet = bulletObj as Phaser.Physics.Arcade.Sprite;
+    bullet.destroy();
+    this.killBonusEnemy(enemyObj as Phaser.Physics.Arcade.Sprite);
+  }
+
+  // C++ bonus_wave_enemy.txt:759-777 — ramming an ASTEROID bounces it back (and
+  // scrapes); ramming any other enemy blows it up for score, same as a bullet.
+  private onPlayerHitEnemy(_playerObj: any, enemyObj: any): void {
     const enemy = enemyObj as Phaser.Physics.Arcade.Sprite;
+    if (!enemy.active || (enemy as any)._dying) return;
     const data = (enemy.getData('enemy') as EnemyData) ?? { type: WaveType.SLOW_PLANES };
 
-    bullet.destroy();
+    if (data.type === WaveType.RANDOM_ASTEROIDS) {
+      const body = enemy.body as Phaser.Physics.Arcade.Body;
+      if (body.velocity.x < 0) {
+        enemy.setVelocityX(-body.velocity.x);
+        if (this.cache.audio.exists('asteroid_scrape')) {
+          this.sound.play('asteroid_scrape', { volume: 0.5 });
+        }
+      }
+      return;
+    }
+
+    this.killBonusEnemy(enemy);
+  }
+
+  private killBonusEnemy(enemy: Phaser.Physics.Arcade.Sprite): void {
+    // Guard against a bullet and the player (or two frames) both killing it.
+    if (!enemy.active || (enemy as any)._dying) return;
+    (enemy as any)._dying = true;
+    const data = (enemy.getData('enemy') as EnemyData) ?? { type: WaveType.SLOW_PLANES };
 
     this.enemiesKilled += 1;
 
@@ -429,6 +460,11 @@ export default class BonusLevelScene extends Phaser.Scene {
     // Asteroids / circles bouncing types deflect off vertical edges (visual only).
     enemy.setData('bounceY', type === WaveType.REGULAR_PAINTBALL_BOUNCE ||
       type === WaveType.RANDOM_PAINTBALL_BOUNCE || type === WaveType.RANDOM_CIRCLES);
+
+    // Spawn timestamp — used to retire long-lived enemies. The shooter waves
+    // spawn stationary, and waves advance on a timer (not wait-until-cleared),
+    // so without this they accumulate on screen indefinitely.
+    enemy.setData('born', this.time.now);
   }
 
   // --- end-of-bonus summary (main_game_controller.txt L409-440) ---
@@ -531,6 +567,14 @@ export default class BonusLevelScene extends Phaser.Scene {
     for (let i = children.length - 1; i >= 0; i--) {
       const enemy = children[i] as Phaser.Physics.Arcade.Sprite;
       if (!enemy.active) continue;
+
+      // Retire any enemy that has lingered too long (mainly the stationary
+      // shooter waves), so the field doesn't fill up over the bonus round.
+      if (this.time.now - ((enemy.getData('born') as number) ?? this.time.now) > 7000) {
+        enemy.destroy();
+        continue;
+      }
+
       const body = enemy.body as Phaser.Physics.Arcade.Body;
 
       // Up-and-downers weave on a sine wave.

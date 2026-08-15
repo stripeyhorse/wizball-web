@@ -1,1 +1,15 @@
 node_modules/
+
+# Claude Code local state (contains worktrees / stale checkouts — never commit)
+.claude/
+.codex
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Vite
+.vite/
+*.local

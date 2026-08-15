@@ -55,7 +55,7 @@ export default class HiScoreSystem {
 
   addScore(name: string, score: number, level: number): number {
     const entry: HiScoreEntry = {
-      name: name.toUpperCase().substring(0, 3),
+      name: name.toUpperCase().substring(0, 13), // C++ HISCORE_MAX_NAME_LENGTH = 13
       score,
       level,
       date: new Date().toISOString().split('T')[0]

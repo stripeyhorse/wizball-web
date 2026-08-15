@@ -9,6 +9,7 @@ export const DEFAULT_SETTINGS: GameSettings = {
     fullscreen: false,
     pixelArtSmoothing: false,
     showFPS: false,
+    crtMode: 'amiga', // tasteful Amiga-500 CRT on by default; 'off' / 'c64' in Settings
   },
   bindings: {
     moveLeft:  { keyboard: Phaser.Input.Keyboard.KeyCodes.LEFT,  gamepadButton: 14 },  // D-pad left

@@ -17,6 +17,7 @@ export interface GraphicsSettings {
   fullscreen: boolean;
   pixelArtSmoothing: boolean;  // inverts pixelArt flag (requires restart)
   showFPS: boolean;
+  crtMode: 'off' | 'c64' | 'amiga'; // CRT post-processing filter preset
 }
 
 export interface GameSettings {

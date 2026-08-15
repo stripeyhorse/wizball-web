@@ -49,12 +49,30 @@ export default class WarpTubeSystem {
 
   constructor(scene: Phaser.Scene) {
     this.scene = scene;
+    this.ensureParticleTexture();
+  }
+
+  // The emitters previously used the texture key 'default', which is never
+  // created — Phaser substituted its green __MISSING checkerboard, so every warp
+  // zone (and every twinkle burst) spat out green squares. Generate a real soft
+  // white dot once and use that instead.
+  private ensureParticleTexture(): void {
+    if (this.scene.textures.exists('wt_particle')) return;
+    const g = this.scene.add.graphics();
+    g.fillStyle(0xffffff, 1);
+    g.fillCircle(4, 4, 3);
+    g.generateTexture('wt_particle', 8, 8);
+    g.destroy();
   }
 
   public addWarpTube(data: WarpTubeData): void {
     const key = `${data.x},${data.y}`;
 
-    // Create warp tube marker
+    // Create warp tube marker. The C++ warp zones are invisible editor icons
+    // (warp_zone_up/down.txt have no draw mode); the original only renders the
+    // tube graphic that drops in on arrival. We keep a *subtle* shimmer so the
+    // zone is discoverable in the web port without the previous garish
+    // bright-stroked pulsing box.
     const color = data.direction === 'up' ? 0x44aaff : 0xff44aa;
     const warpTube = this.scene.add.rectangle(
       data.x,
@@ -62,9 +80,8 @@ export default class WarpTubeSystem {
       data.width,
       data.height,
       color,
-      0.3
+      0.16
     );
-    warpTube.setStrokeStyle(2, color, 1);
     warpTube.setDepth(15);
 
     // Store data on the object
@@ -76,17 +93,26 @@ export default class WarpTubeSystem {
     this.createWarpParticles(data);
   }
 
-  private createWarpParticles(_data: WarpTubeData): void {
-    const emitter = this.scene.add.particles(_data.x + _data.width / 2, _data.y + _data.height / 2, 'default', {
-      speed: { min: 20, max: 40 },
+  private createWarpParticles(data: WarpTubeData): void {
+    const color = data.direction === 'up' ? 0x44aaff : 0xff44aa;
+    const emitter = this.scene.add.particles(data.x, data.y, 'wt_particle', {
+      speed: { min: 12, max: 28 },
       scale: { start: 0.5, end: 0 },
-      alpha: { start: 0.8, end: 0 },
-      lifespan: 1000,
-      frequency: 100,
+      alpha: { start: 0.5, end: 0 },
+      tint: color,
+      lifespan: 900,
+      frequency: 240, // gentle, occasional — not a constant stream
       blendMode: 'ADD'
     });
+    emitter.setDepth(14);
 
     this.warpParticles.push(emitter);
+  }
+
+  /** True while a warp-out sequence is in progress (C++ getting_sucked_into_a_hole_flag).
+   *  GameScene reads this to suppress player control / velocity during the warp. */
+  public isActive(): boolean {
+    return this.isWarping;
   }
 
   public checkWarp(player: Phaser.Physics.Arcade.Sprite): void {
@@ -220,6 +246,13 @@ export default class WarpTubeSystem {
   public playArrival(x: number, y: number, direction: 'up' | 'down'): void {
     const color = direction === 'up' ? 0x44aaff : 0xff44aa;
 
+    // C++ warp_tube_exit.txt:27 plays warp_tube_appear as the empty tube drops
+    // in (the matching deposit sound is fired by GameScene). Previously this key
+    // was preloaded but never played.
+    if (this.scene.cache.audio.exists('warp_tube_appear')) {
+      this.scene.sound.play('warp_tube_appear', { volume: 0.6 });
+    }
+
     // The "tube": drops in from above (y=-128 in the original, y_vel=64),
     // settles over the deposit point, then retracts back up and out.
     const tubeHeight = 96;
@@ -289,7 +322,7 @@ export default class WarpTubeSystem {
 
   /** Scatter twinkle particles, matching the warp-out/deposit sparkle. */
   private spawnTwinkles(x: number, y: number): void {
-    const emitter = this.scene.add.particles(x, y, 'default', {
+    const emitter = this.scene.add.particles(x, y, 'wt_particle', {
       speed: { min: 60, max: 160 },
       scale: { start: 0.6, end: 0 },
       alpha: { start: 1, end: 0 },
@@ -318,9 +351,9 @@ export default class WarpTubeSystem {
       }
     }
 
-    // Animate warp tube markers (pulsing glow).
+    // Animate warp tube markers (subtle shimmer — range ~0.06..0.22).
     this.warpTubes.forEach(warpTube => {
-      const pulse = Math.sin(Date.now() / 500) * 0.2 + 0.3;
+      const pulse = Math.sin(Date.now() / 600) * 0.08 + 0.14;
       warpTube.setAlpha(pulse);
     });
   }

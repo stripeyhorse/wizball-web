@@ -5,9 +5,9 @@ import { playSceneMusic } from '../systems/MusicManager';
 
 export default class TitleScene extends Phaser.Scene {
   private startText!: Phaser.GameObjects.Text;
-  private settingsText!: Phaser.GameObjects.Text;
   private titleImage!: Phaser.GameObjects.Image;
   private hiScorePanel!: Phaser.GameObjects.Container;
+  private creditLogos: Array<Phaser.GameObjects.Image | Phaser.GameObjects.Rectangle> = [];
   private blinkTimer = 0;
   private attractTimer = 0;
   private showingScores = false;
@@ -43,6 +43,7 @@ export default class TitleScene extends Phaser.Scene {
       }).setOrigin(0.5).setDepth(-1);
     }
 
+    this.buildCreditLogos();
     this.buildHiScorePanel();
     this.hiScorePanel.setVisible(false);
 
@@ -51,7 +52,7 @@ export default class TitleScene extends Phaser.Scene {
       backgroundColor: '#000000cc', padding: { x: 12, y: 6 },
     }).setOrigin(0.5).setDepth(10);
 
-    this.settingsText = this.add.text(636, 410, 'S: Settings', {
+    this.add.text(636, 410, 'S: Settings', {
       fontSize: '11px', color: '#aaaaaa', fontFamily: 'monospace',
       backgroundColor: '#000000aa', padding: { x: 4, y: 2 },
     }).setOrigin(1, 1).setDepth(10);
@@ -70,6 +71,26 @@ export default class TitleScene extends Phaser.Scene {
     }
 
     playSceneMusic(this, 'wizball_title');
+  }
+
+  // The original Retrospec-remake credit logos (graphics: Smila, music: Infamous),
+  // extracted from the recovered intro art and shown along the bottom of the title.
+  private buildCreditLogos(): void {
+    const y = 360;
+    const place = (key: string, x: number, h: number): void => {
+      if (!this.textures.exists(key)) return;
+      const src = this.textures.get(key).getSourceImage();
+      const img = this.add.image(x, y, key).setOrigin(0.5).setDepth(8);
+      img.setScale(h / src.height);
+      this.creditLogos.push(img);
+    };
+    // Faint strip behind for legibility over the title art.
+    this.creditLogos.push(
+      this.add.rectangle(320, y, 300, 38, 0x000000, 0.45).setDepth(7)
+    );
+    place('logo_smila', 244, 30);
+    place('logo_retrospec', 320, 24);
+    place('logo_infamous', 392, 30);
   }
 
   // Hi-score table on a dark panel — shown by alternating with the title art,
@@ -130,6 +151,7 @@ export default class TitleScene extends Phaser.Scene {
       this.attractTimer = 0;
       this.showingScores = !this.showingScores;
       this.titleImage.setVisible(!this.showingScores);
+      this.creditLogos.forEach(l => l.setVisible(!this.showingScores));
       this.hiScorePanel.setVisible(this.showingScores);
     }
   }

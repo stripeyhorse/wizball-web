@@ -4,7 +4,8 @@ import { playSceneMusic } from '../systems/MusicManager';
 
 export default class GetReadyScene extends Phaser.Scene {
   private level: number = 1;
-  private countdown: number = 20;
+  private countdown: number = 180; // ~3s at 60fps (was 20 frames ≈ 0.33s — far too quick)
+  private inputLockFrames: number = 20; // C++ get_ready_screen.txt: 20-frame input lockout
   private countdownText!: Phaser.GameObjects.Text;
   private starfield: Phaser.GameObjects.Graphics[] = [];
 
@@ -74,6 +75,8 @@ export default class GetReadyScene extends Phaser.Scene {
   }
 
   private startGame(): void {
+    // C++ holds input for the first 20 frames before FIRE can skip the screen.
+    if (this.inputLockFrames > 0) return;
     if (this.cache.audio.exists('menu_select')) {
       this.sound.add('menu_select', { volume: 0.6 }).play();
     }
@@ -81,9 +84,10 @@ export default class GetReadyScene extends Phaser.Scene {
   }
 
   update(): void {
+    if (this.inputLockFrames > 0) this.inputLockFrames--;
     this.countdown--;
 
-    const seconds = Math.ceil(this.countdown / 60);
+    const seconds = Math.max(0, Math.ceil(this.countdown / 60));
     this.countdownText.setText(`Starting in ${seconds}...`);
 
     this.starfield.forEach((star, i) => {

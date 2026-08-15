@@ -12,6 +12,7 @@ import GameOverScene from './scenes/GameOverScene';
 import GameCompleteScene from './scenes/GameCompleteScene';
 import SettingsScene from './scenes/SettingsScene';
 import PauseScene from './scenes/PauseScene';
+import { CRTPipeline, CRT_PIPELINE_KEY, applyCRTToScene } from './systems/CRTPipeline';
 
 // Game dimensions from C++ constants
 const GAME_WIDTH = 640;
@@ -62,6 +63,32 @@ const config: Phaser.Types.Core.GameConfig = {
 };
 
 const game = new Phaser.Game(config);
+
+// --- CRT post-processing (WebGL only) ---------------------------------------
+// Register the pipeline once the renderer is ready, then apply it to every
+// scene's main camera as it's created (covers all scene transitions/restarts)
+// and whenever the CRT preset is changed in Settings.
+game.events.once('ready', () => {
+  const renderer = game.renderer;
+  if (!(renderer instanceof Phaser.Renderer.WebGL.WebGLRenderer)) return; // Canvas fallback: no CRT
+
+  renderer.pipelines.addPostPipeline(CRT_PIPELINE_KEY, CRTPipeline);
+
+  const currentMode = () => Settings.getInstance().get().graphics.crtMode;
+
+  // Re-apply to the camera every time a scene runs its create().
+  game.scene.scenes.forEach((scene) => {
+    scene.sys.events.on(Phaser.Scenes.Events.CREATE, () => applyCRTToScene(scene, currentMode()));
+  });
+
+  // Live-update when the preset changes in the Settings menu.
+  game.events.on('settings:changed', () => {
+    game.scene.getScenes(true).forEach((scene) => applyCRTToScene(scene, currentMode()));
+  });
+
+  // Apply to whatever is already on screen at boot.
+  game.scene.getScenes(true).forEach((scene) => applyCRTToScene(scene, currentMode()));
+});
 
 // Expose the game instance for debugging / automated verification.
 (window as unknown as { game: Phaser.Game }).game = game;

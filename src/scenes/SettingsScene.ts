@@ -5,6 +5,10 @@ import { Settings } from '../config/Settings';
 import { DEFAULT_SETTINGS } from '../config/DefaultSettings';
 
 const TABS = ['Graphics', 'Controls', 'Gamepad'] as const;
+const CRT_MODES = ['off', 'c64', 'amiga'] as const;
+function crtLabel(mode: string): string {
+  return mode === 'c64' ? 'C64' : mode === 'amiga' ? 'AMIGA 500' : 'OFF';
+}
 const ACTION_LABELS: Record<ActionName, string> = {
   moveLeft: 'Move Left',
   moveRight: 'Move Right',
@@ -201,6 +205,7 @@ export default class SettingsScene extends Phaser.Scene {
       `Fullscreen: ${cfg.fullscreen ? 'ON' : 'OFF'}`,
       `Pixel Smoothing: ${cfg.pixelArtSmoothing ? 'ON' : 'OFF'}`,
       `Show FPS: ${cfg.showFPS ? 'ON' : 'OFF'}`,
+      `CRT Filter: < ${crtLabel(cfg.crtMode)} >`,
     ];
 
     this.graphicsItems = items.map((label, i) => {
@@ -222,6 +227,7 @@ export default class SettingsScene extends Phaser.Scene {
       `Fullscreen: ${cfg.fullscreen ? 'ON' : 'OFF'}`,
       `Pixel Smoothing: ${cfg.pixelArtSmoothing ? 'ON' : 'OFF'}`,
       `Show FPS: ${cfg.showFPS ? 'ON' : 'OFF'}`,
+      `CRT Filter: < ${crtLabel(cfg.crtMode)} >`,
     ];
     this.graphicsItems.forEach((t, i) => t.setText(labels[i]));
   }
@@ -386,6 +392,9 @@ export default class SettingsScene extends Phaser.Scene {
       case 3: // Show FPS
         cfg.graphics.showFPS = !cfg.graphics.showFPS;
         break;
+      case 4: // CRT filter — ENTER cycles forward
+        this.cycleCRT(1);
+        return;
     }
     this.settings.save();
     this.refreshUI();
@@ -400,7 +409,21 @@ export default class SettingsScene extends Phaser.Scene {
       cfg.graphics.resolutionScale = scales[newIdx];
       this.settings.save();
       this.refreshUI();
+    } else if (this.selectedRow === 4) { // CRT filter
+      this.cycleCRT(direction);
     }
+  }
+
+  private cycleCRT(direction: number): void {
+    const cfg = this.settings.get();
+    const idx = CRT_MODES.indexOf(cfg.graphics.crtMode);
+    const next = (idx + direction + CRT_MODES.length) % CRT_MODES.length;
+    cfg.graphics.crtMode = CRT_MODES[next];
+    this.settings.save();
+    // Live preview — re-applies the pipeline to all active cameras (this menu
+    // and the screen behind it) so you see the filter change instantly.
+    this.game.events.emit('settings:changed');
+    this.refreshUI();
   }
 
   private toggleGamepadItem(): void {

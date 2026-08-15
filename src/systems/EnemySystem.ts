@@ -39,6 +39,9 @@ const SPREAD_ANGLES = [0, 4500, 9000, 13500, 18000, 22500, 27000, 31500];
 
 const MIN_WAVE_SIZE = 8;
 const MAX_WAVE_SIZE = 10;
+
+// Paint-bubble tints (0=Red, 1=Green, 2=Blue) — matches GameScene PAINT_FRAME_COLORS.
+const PAINT_TINTS = [0xff0000, 0x00ff00, 0x0000ff];
 const PAINT_BUBBLE_WAVE_COUNT = 3;
 const POSITION_ALL = 7;
 
@@ -60,6 +63,7 @@ interface MoleculeSpawnSlot {
 }
 
 const SOLID_DIAMOND_PERCENTAGE_SPEED = 4000;
+const SOLID_DIAMOND_START_DISTANCE = 224; // C++ constant.txt:415 — fixed path-base Y
 const FUZZ_PERCENTAGE_SPEED = 2000;
 const FUZZ_EXIT_SPEED = 5376;
 const FUZZ_EXIT_THRESHOLD = 1000000;
@@ -96,6 +100,8 @@ interface EnemyData {
   // Bobble hat bounce fields
   startY: number;
   bounceFromFloor: boolean;
+  // Paint-bubble colour (0=R,1=G,2=B) so the dropped paint matches the bubble.
+  paintColor?: number;
 }
 
 const BEHAVIOUR_STATE_PAUSED = 0;
@@ -279,10 +285,26 @@ export default class EnemySystem {
       bubbleIndices.add(Math.floor(Math.random() * this.waveSpawnSlots.length));
     }
 
+    // C++ spawn_paintball_wave.txt:148-149 — every paint bubble on a level is a
+    // SINGLE colour: (player_on_level_number) mod 3. The completion targets need
+    // other colours too, which you gather by warping to adjacent levels (each a
+    // different colour); the cauldrons persist across levels. 0-indexed: port
+    // level 1 -> RED, 2 -> GREEN, 3 -> BLUE, 4 -> RED, ...
+    const levelPaintColor = ((level - 1) % 3 + 3) % 3;
+
     this.waveSpawnSlots.forEach((slot, index) => {
-      const wave = bubbleIndices.has(index)
-        ? this.createWaveConfig(Math.random() < (1 / 13) ? EnemyType.BONUS_MOLECULE : EnemyType.PAINT_BUBBLES, level, slot.allowedPositions)
-        : this.createWaveConfig(this.pickRegularEnemyType(slot.allowedPositions), level, slot.allowedPositions);
+      let wave: WaveConfig;
+      if (bubbleIndices.has(index)) {
+        if (Math.random() < (1 / 13)) {
+          wave = this.createWaveConfig(EnemyType.BONUS_MOLECULE, level, slot.allowedPositions);
+        } else {
+          wave = this.createWaveConfig(EnemyType.PAINT_BUBBLES, level, slot.allowedPositions);
+          wave.paintColor = levelPaintColor;
+          wave.paintVariant = this.pickPaintBubbleVariant(slot.allowedPositions);
+        }
+      } else {
+        wave = this.createWaveConfig(this.pickRegularEnemyType(slot.allowedPositions), level, slot.allowedPositions);
+      }
 
       this.spawnWave(wave, slot, level);
     });
@@ -321,11 +343,33 @@ export default class EnemySystem {
       case EnemyType.UP_AND_DOWNERS:
         return Phaser.Math.Between(minY, maxY);
       case EnemyType.PAINT_BUBBLES:
-        return wave.positionMask === 2
+        // Middle bubbles wobble in the mid-field; edge bubbles bounce from the
+        // roof/floor (C++ spawn_paintball_wave top_or_bottom_flag → start height).
+        return wave.paintVariant === 'middle'
           ? Phaser.Math.Between(minY, maxY)
           : (Math.random() > 0.5 ? minY : maxY);
       default:
         return maxY;
+    }
+  }
+
+  // C++ spawn_paintball_wave.txt switch on the wave's allowed position (1=T, 2=M,
+  // 3=TM, 4=B, 5=TB, 6=MB, 7=TMB): decides whether this paint-bubble wave does
+  // the mid-field circular wobble ('middle') or a roof/floor gravity bounce ('edge').
+  private pickPaintBubbleVariant(allowedPositions: number): 'middle' | 'edge' {
+    switch (allowedPositions) {
+      case 2: // M
+        return 'middle';
+      case 1: // T
+      case 4: // B
+      case 5: // TB
+        return 'edge';
+      case 3: // TM → roof or middle
+      case 6: // MB → floor or middle
+        return Math.random() < 0.5 ? 'middle' : 'edge';
+      case 7: // TMB → floor / roof / middle
+      default:
+        return Math.random() < (1 / 3) ? 'middle' : 'edge';
     }
   }
 
@@ -528,10 +572,15 @@ export default class EnemySystem {
       gravity = wave.minGravity + Math.random() * (wave.maxGravity - wave.minGravity);
     }
 
+    // C++ start_movement (generic_level_enemy.txt:895-904): each enemy initially
+    // heads TOWARD the player (if the ball is to its left, it goes left) rather
+    // than a random direction.
+    const towardPlayer = (this.playerRef && this.playerRef.x < x) ? -1 : 1;
+
     const data: EnemyData = {
       enemyType: wave.type,
       waveConfig: wave,
-      xVelFixed: (Math.random() > 0.5 ? 1 : -1) * hSpeed,
+      xVelFixed: towardPlayer * hSpeed,
       yVelFixed: 0,
       gravityFixed: gravity,
       behaviourState: BEHAVIOUR_STATE_PAUSED,
@@ -563,9 +612,20 @@ export default class EnemySystem {
         data.gravityFixed = 0;
         break;
 
-      case EnemyType.PAINT_BUBBLES:
+      case EnemyType.PAINT_BUBBLES: {
         data.yVelFixed = 0;
+        // Middle bubbles wobble with NO gravity (the updatePaintBubbleBehaviour
+        // wobble branch keys off gravityFixed === 0); edge bubbles keep gravity.
+        if (wave.paintVariant === 'middle') {
+          data.gravityFixed = 0;
+        }
+        // Tint the bubble its paint colour and remember it so the dropped
+        // paintdrop matches (C++ paintdrop inherits paint_bubble_colour_flag).
+        const pc = wave.paintColor ?? 0;
+        data.paintColor = pc;
+        enemy.setTint(PAINT_TINTS[pc] ?? PAINT_TINTS[0]);
         break;
+      }
 
       case EnemyType.CRABBY_BOUNCERS:
       case EnemyType.MOLECULE_BOUNCERS:
@@ -621,7 +681,13 @@ export default class EnemySystem {
         data.pathPercentageSpeed = SOLID_DIAMOND_PERCENTAGE_SPEED;
         data.pathSection = -1;
         data.baseWorldX = x;
-        data.baseWorldY = y;
+        // C++ spawn_solid_diamond_wave.txt:97-100 anchors the path base Y to a
+        // FIXED SOLID_DIAMOND_START_DISTANCE (224, top), not the spawn-slot Y, so
+        // diamonds always ride at the correct height regardless of spawn box.
+        data.baseWorldY = SOLID_DIAMOND_START_DISTANCE;
+        // C++ start_movement mirrors the path toward the player (the case below
+        // can't, since xVel is 0 here). PATH_CURRENT_OFFSET_X * direction_multiplier.
+        data.directionMultiplier = towardPlayer;
         // Solid diamonds don't collide with world bounds - path controls position
         body.setCollideWorldBounds(false);
         body.setAllowGravity(false);
@@ -1157,11 +1223,12 @@ export default class EnemySystem {
         }
       }
     } else {
-      // Middle variant: circular wobble (C++ PAINT_BUBBLE_MIDDLE_DEVIATION = 64)
+      // Middle variant: circular wobble. C++ generic_level_enemy.txt:524-527 —
+      // x_vel = 768·sin(angle)·dir, y_vel = -768·cos(angle), angle += 250.
       data.behaviourCounter = (data.behaviourCounter + 250) % 36000;
       const angle = (data.behaviourCounter / 36000) * Math.PI * 2;
-      data.xVelFixed = Math.cos(angle) * 768 * data.directionMultiplier;
-      data.yVelFixed = -Math.sin(angle) * 768;
+      data.xVelFixed = Math.sin(angle) * 768 * data.directionMultiplier;
+      data.yVelFixed = -Math.cos(angle) * 768;
       enemy.setVelocity(data.xVelFixed * speedScale, data.yVelFixed * speedScale);
     }
   }

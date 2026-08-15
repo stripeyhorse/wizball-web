@@ -100,7 +100,7 @@ export default class GameOverScene extends Phaser.Scene {
       fontStyle: 'bold'
     }).setOrigin(0.5);
 
-    this.add.text(320, 240, 'ENTER YOUR NAME (3 LETTERS):', {
+    this.add.text(320, 240, 'ENTER YOUR NAME:', {
       fontSize: '14px',
       color: '#ffffff',
       fontFamily: 'monospace'
@@ -124,13 +124,14 @@ export default class GameOverScene extends Phaser.Scene {
   }
 
   private handleNameInput(event: KeyboardEvent): void {
-    if (event.key.length === 1 && /[a-zA-Z]/.test(event.key) && this.nameInput.length < 3) {
+    // C++ HISCORE_MAX_NAME_LENGTH = 13 (was capped at 3 here).
+    if (event.key.length === 1 && /[a-zA-Z0-9 ]/.test(event.key) && this.nameInput.length < 13) {
       this.nameInput += event.key.toUpperCase();
       this.nameText.setText(this.nameInput.padEnd(3, '_'));
     } else if (event.key === 'Backspace' && this.nameInput.length > 0) {
       this.nameInput = this.nameInput.slice(0, -1);
       this.nameText.setText(this.nameInput.padEnd(3, '_'));
-    } else if (event.key === 'Enter' && this.nameInput.length === 3) {
+    } else if (event.key === 'Enter' && this.nameInput.length >= 1) {
       this.submitScore();
     }
   }
@@ -165,7 +166,7 @@ export default class GameOverScene extends Phaser.Scene {
 
   private handleInput(): void {
     if (this.enteringName) {
-      if (this.nameInput.length === 3) {
+      if (this.nameInput.length >= 1) {
         this.submitScore();
       }
     } else {
@@ -185,8 +186,8 @@ export default class GameOverScene extends Phaser.Scene {
   // Touch confirm: submit the score (auto-filling the name) or restart.
   private touchConfirm(): void {
     if (this.enteringName) {
-      if (this.nameInput.length < 3) {
-        this.nameInput = (this.nameInput + 'YOU').slice(0, 3);
+      if (this.nameInput.length === 0) {
+        this.nameInput = 'YOU'; // touch confirm with no input → default name
       }
       this.submitScore();
     } else {

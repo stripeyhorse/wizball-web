@@ -206,7 +206,9 @@ export default class LaboratoryScene extends Phaser.Scene {
         this.scene.start('GameComplete', { score: this.score, level: this.level });
         return;
       }
-      this.scene.start(GAME, { ...shared, level: this.level + 1, levelProgress: 0, cauldronFill: [0, 0, 0, 0] });
+      // C++ CAULDRON_FULLNESS_ARRAY persists across the whole game (only drained
+      // per completed stage), so any surplus paint carries to the next level.
+      this.scene.start(GAME, { ...shared, level: this.level + 1, levelProgress: 0, cauldronFill: this.cauldronFill });
     } else {
       // More colour stages remain — return to the SAME level, resuming progress.
       this.scene.start(GAME, { ...shared, level: this.level, levelProgress: this.levelProgress, cauldronFill: this.cauldronFill });

@@ -54,6 +54,13 @@ export interface WaveConfig {
   // Behavior-specific params
   behaviourType: number;
   startDistance: number;
+  // Paint-bubble colour (0=Red, 1=Green, 2=Blue). Only set for PAINT_BUBBLES
+  // waves so the dropped paintdrop matches the bubble that was shot.
+  paintColor?: number;
+  // Paint-bubble vertical variant (C++ top_or_bottom_flag): 'middle' bubbles do
+  // a circular wobble with no gravity; 'edge' bubbles gravity-bounce off the
+  // floor/ceiling. Only set for PAINT_BUBBLES waves.
+  paintVariant?: 'middle' | 'edge';
 }
 
 export interface LevelWaves {
@@ -120,18 +127,21 @@ const ENEMY_CONSTANTS: Record<number, Partial<WaveConfig>> = {
     startDistance: 272,
   },
   [EnemyType.BONUS_MOLECULE]: {
-    minSpeed: 128,
-    maxSpeed: 256,
+    // C++ spawn_molecule_bonus_wave.txt: a stationary pearl-dropper — zero
+    // speed/gravity, no firing (matches EnemySystem.createWaveConfig). The old
+    // moving+firing config contradicted the runtime one.
+    minSpeed: 0,
+    maxSpeed: 0,
     minVerticalSpeed: 0,
     maxVerticalSpeed: 0,
-    gravity: 48,
-    minGravity: 48,
-    maxGravity: 48,
+    gravity: 0,
+    minGravity: 0,
+    maxGravity: 0,
     positionMask: POSITION_TOP_BOTTOM,
-    firingBehaviour: BULLET_TYPE_SINGLE_DIRECTED | BULLET_FREQUENCY_FIXED,
+    firingBehaviour: BULLET_TYPE_NONE,
     bulletSpeedPercentage: 10000,
     waveSubType: WAVE_SUBTYPE_UNIFORM,
-    startDistance: 272,
+    startDistance: 0,
   },
   [EnemyType.HOLLOW_CIRCLES]: {
     minSpeed: 256,
@@ -315,11 +325,10 @@ function createWaveConfig(type: EnemyType, level: number, count: number): WaveCo
         : (BULLET_TYPE_SINGLE_DIRECTED | BULLET_FREQUENCY_FIXED);
       break;
     case EnemyType.BONUS_MOLECULE:
+      // Stationary pearl-dropper — never fires (C++ spawn_molecule_bonus_wave.txt).
       firingFreq = 120 - (level * 5);
       firingDelay = 300;
-      firingBehaviour = Math.random() > 0.5
-        ? (BULLET_TYPE_SPREAD | BULLET_FREQUENCY_FIXED)
-        : (BULLET_TYPE_SINGLE_DIRECTED | BULLET_FREQUENCY_FIXED);
+      firingBehaviour = BULLET_TYPE_NONE;
       break;
     case EnemyType.BOBBLE_HATS:
       firingFreq = 120 - (level * 5);
