@@ -67,6 +67,9 @@ const SOLID_DIAMOND_START_DISTANCE = 224; // C++ constant.txt:415 — fixed path
 const FUZZ_PERCENTAGE_SPEED = 2000;
 const FUZZ_EXIT_SPEED = 5376;
 const FUZZ_EXIT_THRESHOLD = 1000000;
+// C++ function_normal_enemy_am_i_off_screen — an enemy counts as off-screen once
+// it is this far from the camera centre (on-screen re-entry uses 344).
+const OFF_SCREEN_DISTANCE = 368;
 
 const BOBBLE_HAT_START_DISTANCE = 128;
 const BOBBLE_HAT_GRAVITY = 64;
@@ -1001,6 +1004,16 @@ export default class EnemySystem {
       // Exit: straight-line velocity (C++ uses direction_multiplier * 5376)
       const exitVelX = data.directionMultiplier * FUZZ_EXIT_SPEED * speedScale;
       enemy.setVelocity(exitVelX, 0);
+
+      // C++ generic_level_enemy.txt:321-325 + 775-779 — once the Fuzz leaves the
+      // screen it removes itself from the level count and kills itself. Without
+      // this it flies off forever with collideWorldBounds disabled, so the active
+      // enemy count never reaches zero, maybeSpawnReplacementWave() never fires
+      // again, and the level runs out of paint bubbles permanently.
+      const camCentreX = this.scene.cameras.main.scrollX + this.scene.cameras.main.width / 2;
+      if (Math.abs(enemy.x - camCentreX) >= OFF_SCREEN_DISTANCE) {
+        enemy.destroy();
+      }
     }
   }
 

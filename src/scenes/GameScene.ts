@@ -272,7 +272,16 @@ export default class GameScene extends Phaser.Scene {
 
     // Build the level
     this.createLevel();
+    // Phaser's Systems.shutdown() only removes its own TRANSITION listeners — the
+    // scene EventEmitter itself survives every restart. Registering here without
+    // clearing first stacks one handler per restart, so a single warp tube would
+    // fire warpToAdjacentLevel() N times and jump N levels.
+    this.events.off('warp-activate');
     this.events.on('warp-activate', (data: { levelDelta: number }) => {
+      // The emitter outlives the scene's running state, so ignore anything that
+      // arrives after shutdown — rebuilding a level on a torn-down scene hits a
+      // null this.physics.
+      if (!this.scene.isActive()) return;
       this.warpToAdjacentLevel(data.levelDelta);
     });
 
@@ -738,6 +747,22 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * Return a usable static group, reusing `group` only if it survived the last
+   * scene shutdown. Phaser destroys a scene's groups on shutdown but leaves the
+   * scene's fields pointing at them, and a destroyed group's `children` Set is
+   * gone — so `clear()` on one throws `Cannot read properties of undefined`.
+   */
+  private reuseOrCreateStaticGroup(
+    group: Phaser.Physics.Arcade.StaticGroup | undefined
+  ): Phaser.Physics.Arcade.StaticGroup {
+    if (group && group.children) {
+      group.clear(true, true);
+      return group;
+    }
+    return this.physics.add.staticGroup();
+  }
+
   private createLevel(): void {
     this.clearLevelVisuals();
     this.tilemapLayers.forEach(layer => layer.destroy());
@@ -746,17 +771,17 @@ export default class GameScene extends Phaser.Scene {
     this.worldCollisionMap = null;
     this.currentParsedTilemap = null;
 
-    if (this.walls === undefined) {
-      this.walls = this.physics.add.staticGroup();
-    } else {
-      this.walls.clear(true, true);
-    }
+    // Phaser reuses the scene instance across restarts and DESTROYS these groups
+    // on shutdown, but the fields keep pointing at the dead objects. A destroyed
+    // group has `children === undefined`, so testing for `undefined` is not enough
+    // — `.clear()` on one throws and kills the scene mid-create(). Re-create
+    // whenever the group is missing OR already torn down.
+    this.walls = this.reuseOrCreateStaticGroup(this.walls);
+    this.warpMounds = this.reuseOrCreateStaticGroup(this.warpMounds);
 
-    if (this.warpMounds === undefined) {
-      this.warpMounds = this.physics.add.staticGroup();
-    } else {
-      this.warpMounds.clear(true, true);
-    }
+    // Warp zones are re-registered per level below; drop the previous level's
+    // tubes (and their particle emitters) or they stay armed and leak.
+    this.warpTubeSystem.clear();
 
     const levelData = getLevelData(this.currentLevel);
     const tilesetIndex = levelData?.tilesetIndex ?? Math.max(0, this.currentLevel - 1);
@@ -891,11 +916,7 @@ export default class GameScene extends Phaser.Scene {
     this.collisionLayer = null;
     this.worldCollisionMap = null;
 
-    if (!this.warpMounds) {
-      this.warpMounds = this.physics.add.staticGroup();
-    } else {
-      this.warpMounds.clear(true, true);
-    }
+    this.warpMounds = this.reuseOrCreateStaticGroup(this.warpMounds);
 
     const bgKey = `background_level_${this.currentLevel}`;
     if (this.textures.exists(bgKey)) {

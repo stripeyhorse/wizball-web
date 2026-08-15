@@ -44,6 +44,18 @@ export default class LaboratoryScene extends Phaser.Scene {
     this.cauldronFill = data.cauldronFill ? [...data.cauldronFill] : [0, 0, 0, 0];
     // C++ main_game_controller.txt:508-510 — entering the lab awards +2000.
     this.score += 2000;
+
+    // Per-visit state. These were field initialisers only, which run once in the
+    // constructor — Phaser reuses the scene instance forever. `complete` stayed
+    // true after the first visit, so update() bailed on frame one and the second
+    // laboratory accepted no input at all: an unrecoverable softlock.
+    this.complete = false;
+    this.selectedIndex = 0;
+    this.options = [];
+    this.icons = [];
+    this.tLeft = false;
+    this.tRight = false;
+    this.tFire = false;
   }
 
   create(): void {
