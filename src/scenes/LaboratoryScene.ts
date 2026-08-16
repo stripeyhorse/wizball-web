@@ -11,6 +11,12 @@ interface UpgradeOption {
 
 // C++ constant.txt:217 — 2100 frames of shield (~30s at 60Hz).
 const SHIELD_STARTING_ENERGY = 2100;
+
+// Points for declining the permanent upgrade, flat at every level. See the long
+// note at the award site for why this is 9000 and not (9 - level) * 1000:
+// lab_manage_permanent_upgrade_icons.txt:162 computes `9 - temp_2` against a slot
+// that is provably 0, so the level read on the line above it never reaches the sum.
+const DECLINE_BONUS = 9000;
 // Every C++ write to wizball_shield_stored_health / cat_shield_stored_health is
 // either that constant or a `!< 0` decrement (wizball.txt:914, :920, :1067-1098,
 // :1122-1132, plus the on-hit penalties in wizball_shield_bubble_layer.txt:137-139
@@ -313,32 +319,29 @@ export default class LaboratoryScene extends Phaser.Scene {
       // C++ lab_manage_permanent_upgrade_icons.txt:158-167 — declining the bonus
       // ("No bonus = lotsa' points! Ish.") awards points instead.
       //
-      // KNOWN DIVERGENCE, deliberately left in place. The original contains a
-      // typo: :161 reads player_on_level_number into temp_3 and :162 immediately
-      // clobbers it with `9 - temp_2` — almost certainly meant to be `9 - temp_3`.
-      // temp_2 is unassigned at that point (its first write in the file is :165),
-      // and it resolves to a determinate 0, not junk: temp_2 is ENT_TEMP_2, a
-      // per-entity slot, and every spawn memcpys the global `reset_entity` over an
-      // entity's variables (scripting.cpp:545); reset_entity is zeroed at boot
-      // (scripting.cpp:3036) and its only non-zero writer is the prefab path
-      // (scripting.cpp:10001), which this game never uses — `grep -rn prefab
-      // wizball/scripts/` finds nothing. So the original awards a flat 9000 at
-      // every level, and the level read at :161 is dead code.
+      // A FLAT 9000 at every level, matching what the original actually pays —
+      // NOT the level-scaled (9 - level) * 1000 this port used to award. Do not
+      // "restore" the scaling: the level read that seems to justify it is dead.
       //
-      // This port implements the EVIDENT INTENT, (9 - level) * 1000, which pays
-      // 8000 on level 1 down to 1000 on level 8. That is a real scoring
-      // difference of up to 8000 per decline, and it moves which 100,000
-      // extra-life boundaries get crossed. Switching to a flat 9000 would be the
-      // parity-faithful choice — the same call this port already makes for the
-      // world-edge wraparound in WorldCollision.ts — and is a one-line change
-      // here. It is a gameplay decision, not a bug to be quietly "fixed" in
-      // either direction: two earlier passes rewrote this comment with a
-      // different wrong claim each time.
+      // :161 reads player_on_level_number into temp_3, then :162 immediately
+      // clobbers temp_3 with `9 - temp_2` — almost certainly a typo for
+      // `9 - temp_3`. temp_2 is unassigned at that point (its first write in the
+      // file is :165), and it resolves to a determinate 0 rather than junk:
+      // temp_2 is ENT_TEMP_2, a per-entity slot, and every spawn memcpys the
+      // global `reset_entity` over an entity's variables (scripting.cpp:545);
+      // reset_entity is zeroed at boot (scripting.cpp:3036) and its only non-zero
+      // writer is the prefab path (scripting.cpp:10001), which this game never
+      // uses — `grep -rn prefab wizball/scripts/` finds nothing. So :162 is
+      // `9 - 0`, :163 makes it 9000, and the award does not vary with level.
+      //
+      // This is the same call this port makes for the world-edge wraparound in
+      // WorldCollision.ts: where the original's behaviour and the original's
+      // evident intent disagree, parity follows the behaviour. It is worth ~1000
+      // more on level 1 and ~8000 more on level 8 than the old scaled award, and
+      // it shifts which 100,000 extra-life boundaries a run crosses.
       //
       // The MAXIMUM_POSSIBLE_SCORE clamp matches the add site at :166.
-      this.score = Math.min(
-        MAXIMUM_POSSIBLE_SCORE, this.score + Math.max(0, (9 - this.level)) * 1000
-      );
+      this.score = Math.min(MAXIMUM_POSSIBLE_SCORE, this.score + DECLINE_BONUS);
     }
 
     if (this.cache.audio.exists('permanent_upgrade_selected')) {
