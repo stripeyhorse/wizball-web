@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { GAME } from '../types/game';
+import { GAME, MAXIMUM_POSSIBLE_SCORE } from '../types/game';
 import { WeaponFlag } from '../types/game';
 import { playSceneMusic } from '../systems/MusicManager';
 
@@ -22,6 +22,16 @@ export default class LaboratoryScene extends Phaser.Scene {
   private lives: number = 2;
   private levelProgress: number = 3; // 3 => the level's last stage just finished
   private cauldronFill: number[] = [0, 0, 0, 0];
+  // C++ LEVEL_COMPLETION_ARRAY_ID and the warp window derived from it
+  // (main_game_controller.txt:1067-1093 find_highest_accessable_level, read again at
+  // background.txt:53) live on the persistent main_game_controller entity — they are
+  // never rebuilt from the current level number. The lab is a pass-through for them:
+  // GameScene sends them out on the bonus hop and must get the same values back, or
+  // its accessible-level window silently re-derives itself every lab visit. Left
+  // undefined when the caller does not carry them, which GameScene tolerates.
+  private levelCompletion?: number[];
+  private minOpenLevel?: number;
+  private maxOpenLevel?: number;
   private options: UpgradeOption[] = [];
   private selectedIndex: number = 0;
   private icons: Phaser.GameObjects.Image[] = [];
@@ -46,6 +56,7 @@ export default class LaboratoryScene extends Phaser.Scene {
   init(data: {
     level: number; score?: number; weaponCollection?: number; lives?: number;
     levelProgress?: number; cauldronFill?: number[]; startingLoadout?: number;
+    levelCompletion?: number[]; minOpenLevel?: number; maxOpenLevel?: number;
   }): void {
     this.level = data.level || 1;
     this.score = data.score || 0;
@@ -56,8 +67,14 @@ export default class LaboratoryScene extends Phaser.Scene {
     this.lives = data.lives ?? 2;
     this.levelProgress = data.levelProgress ?? 3;
     this.cauldronFill = data.cauldronFill ? [...data.cauldronFill] : [0, 0, 0, 0];
-    // C++ main_game_controller.txt:508-510 — entering the lab awards +2000.
-    this.score += 2000;
+    // Carried, not re-derived — see the field declarations above.
+    this.levelCompletion = data.levelCompletion ? [...data.levelCompletion] : undefined;
+    this.minOpenLevel = data.minOpenLevel;
+    this.maxOpenLevel = data.maxOpenLevel;
+    // C++ main_game_controller.txt:508-510 — entering the lab awards +2000, and
+    // :509 is `let temp_2 = temp_2 + 2000 !> MAXIMUM_POSSIBLE_SCORE`: the clamp is
+    // on the add site itself, not left to whoever reads the score next.
+    this.score = Math.min(MAXIMUM_POSSIBLE_SCORE, this.score + 2000);
 
     // Per-visit state. These were field initialisers only, which run once in the
     // constructor — Phaser reuses the scene instance forever. `complete` stayed
@@ -218,8 +235,10 @@ export default class LaboratoryScene extends Phaser.Scene {
       }
     } else {
       // C++ lab_manage_permanent_upgrade_icons.txt:158-167 — declining the bonus
-      // awards level-scaled points instead.
-      this.score += Math.max(0, (9 - this.level)) * 1000;
+      // awards level-scaled points instead, clamped at :166.
+      this.score = Math.min(
+        MAXIMUM_POSSIBLE_SCORE, this.score + Math.max(0, (9 - this.level)) * 1000
+      );
     }
 
     if (this.cache.audio.exists('permanent_upgrade_selected')) {
@@ -238,13 +257,20 @@ export default class LaboratoryScene extends Phaser.Scene {
       // when GameScene doesn't read it yet — an ignored extra payload field is
       // harmless, a dropped one loses the permanent upgrade.
       startingLoadout: this.startingLoadout,
-      lives: this.lives
+      lives: this.lives,
+      // The persistent completion array and its warp window ride back to GameScene
+      // untouched (C++ main_game_controller.txt:1067-1093) — dropping them makes
+      // GameScene.init() fall into its reconstruction fallback on every lab exit.
+      levelCompletion: this.levelCompletion,
+      minOpenLevel: this.minOpenLevel,
+      maxOpenLevel: this.maxOpenLevel
     };
 
     if (this.levelProgress >= 3) {
       // Level fully done (all 3 colour stages). C++ flythru.txt:35 awards +7490
-      // for the fly-through to the next level. Advance, or finish the game.
-      this.score += 7490;
+      // for the fly-through to the next level, clamped on the same line. Advance,
+      // or finish the game.
+      this.score = Math.min(MAXIMUM_POSSIBLE_SCORE, this.score + 7490);
       if (this.level >= 8) {
         this.scene.start('GameComplete', { score: this.score, level: this.level });
         return;

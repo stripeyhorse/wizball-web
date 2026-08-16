@@ -69,6 +69,14 @@ export default class SettingsScene extends Phaser.Scene {
   private isCapturing: boolean = false;
   private captureAction: ActionName | null = null;
 
+  // A rebind arms listeners that live *outside* this scene — `window` for the
+  // raw keydown and the game-wide GamepadPlugin — so they are held here and
+  // torn down by cancelCapture(). See the comment on that method.
+  private captureKeyHandler: ((event: KeyboardEvent) => void) | null = null;
+  private capturePadHandler:
+    ((pad: Phaser.Input.Gamepad.Gamepad, button: Phaser.Input.Gamepad.Button, value: number) => void) | null = null;
+  private captureTimer: Phaser.Time.TimerEvent | null = null;
+
   // UI containers per tab
   private tabTexts: Phaser.GameObjects.Text[] = [];
   private graphicsContainer!: Phaser.GameObjects.Container;
@@ -133,7 +141,13 @@ export default class SettingsScene extends Phaser.Scene {
       }).setOrigin(0.5).setDepth(1);
       t.setPadding(10, 8, 10, 8);
       t.setInteractive({ useHandCursor: true });
-      t.on('pointerdown', () => { this.activeTab = i; this.selectedRow = 0; this.refreshUI(); });
+      // Ignored mid-rebind: refreshUI() would wipe the "Press a key" prompt
+      // while the capture is still armed. [ CLOSE ] is not gated the same way —
+      // it cancels the capture instead, so touch users are never trapped.
+      t.on('pointerdown', () => {
+        if (this.isCapturing) return;
+        this.activeTab = i; this.selectedRow = 0; this.refreshUI();
+      });
       return t;
     });
 
@@ -201,6 +215,9 @@ export default class SettingsScene extends Phaser.Scene {
       this.scale.off(Phaser.Scale.Events.ENTER_FULLSCREEN, this.refreshUI, this);
       this.scale.off(Phaser.Scale.Events.LEAVE_FULLSCREEN, this.refreshUI, this);
       this.settings.setTouchOverlayHidden(false);
+      // Last line of defence for a rebind that is still armed — closeSettings()
+      // already cancels, but the scene can also be stopped from outside.
+      this.cancelCapture();
     });
 
     this.buildGraphicsTab();
@@ -604,6 +621,10 @@ export default class SettingsScene extends Phaser.Scene {
       return;
     }
 
+    // Tapping a second row mid-capture would arm another pair of listeners and
+    // orphan the first pair, so retire anything still armed before re-arming.
+    this.cancelCapture();
+
     this.captureAction = actions[this.selectedRow];
     this.isCapturing = true;
     this.captureStatusText.setText(`Press a key for "${ACTION_LABELS[this.captureAction]}" (ESC to cancel, DEL to unbind)`);
@@ -612,6 +633,14 @@ export default class SettingsScene extends Phaser.Scene {
     const handler = (event: KeyboardEvent) => {
       event.preventDefault();
       event.stopPropagation();
+
+      // Never write through a null captureAction: `cfg.bindings[null]` is
+      // undefined and assigning to it throws.
+      const action = this.captureAction;
+      if (!action) {
+        this.cancelCapture();
+        return;
+      }
 
       if (event.keyCode === Phaser.Input.Keyboard.KeyCodes.ESC) {
         this.endCapture();
@@ -622,10 +651,10 @@ export default class SettingsScene extends Phaser.Scene {
       if (event.keyCode === Phaser.Input.Keyboard.KeyCodes.DELETE ||
           event.keyCode === Phaser.Input.Keyboard.KeyCodes.BACKSPACE) {
         // Unbind keyboard
-        cfg.bindings[this.captureAction!].keyboard = null;
+        cfg.bindings[action].keyboard = null;
       } else {
         // Set the new binding
-        cfg.bindings[this.captureAction!].keyboard = event.keyCode;
+        cfg.bindings[action].keyboard = event.keyCode;
       }
       this.settings.save();
       this.game.events.emit('settings:changed');
@@ -633,40 +662,76 @@ export default class SettingsScene extends Phaser.Scene {
     };
 
     // Use raw DOM event to capture any key including ones Phaser might swallow
+    this.captureKeyHandler = handler;
     window.addEventListener('keydown', handler, { once: true, capture: true });
 
-    let padHandler: ((pad: Phaser.Input.Gamepad.Gamepad, button: Phaser.Input.Gamepad.Button, value: number) => void) | null = null;
-    if (this.input.gamepad) {
-      padHandler = (_pad, button) => {
-        const cfg = this.settings.get();
-        cfg.bindings[this.captureAction!].gamepadButton = button.index;
-        this.settings.save();
-        this.game.events.emit('settings:changed');
-        window.removeEventListener('keydown', handler, { capture: true });
-        this.endCapture();
-      };
-      this.input.gamepad.once('down', padHandler);
-    }
+    const padHandler = (_pad: Phaser.Input.Gamepad.Gamepad, button: Phaser.Input.Gamepad.Button) => {
+      const action = this.captureAction;
+      if (!action) {
+        this.cancelCapture();
+        return;
+      }
+      const cfg = this.settings.get();
+      cfg.bindings[action].gamepadButton = button.index;
+      this.settings.save();
+      this.game.events.emit('settings:changed');
+      this.endCapture();
+    };
+    this.capturePadHandler = padHandler;
+    this.input.gamepad?.once('down', padHandler);
 
     // Timeout — cancel after 5 seconds. Unconditional: on a touch device there
     // may be no keyboard *or* gamepad to end the capture with, and without this
-    // the menu would be stuck refusing to navigate.
-    this.time.delayedCall(5000, () => {
-      if (!this.isCapturing) return;
-      window.removeEventListener('keydown', handler, { capture: true });
-      if (padHandler) this.input.gamepad?.off('down', padHandler);
-      this.endCapture();
+    // the menu would be stuck refusing to navigate. It is a *backstop*, not the
+    // disarm: the Clock throws pending timers away on shutdown without firing
+    // them (node_modules/phaser/src/time/Clock.js:436), so cancelCapture() is
+    // what actually guarantees the listeners go.
+    this.captureTimer = this.time.delayedCall(5000, () => {
+      this.captureTimer = null;
+      if (this.isCapturing) this.endCapture();
     });
   }
 
-  private endCapture(): void {
+  /**
+   * Retire an in-flight rebind: both listeners and the backstop timer.
+   *
+   * The keydown handler is on `window` in the capture phase and the pad handler
+   * is on the game-wide GamepadPlugin, so neither dies with the scene. Left
+   * armed after the menu closes, the keydown handler swallowed the next key
+   * pressed anywhere (its stopPropagation beats Phaser's bubble-phase listener
+   * in KeyboardManager) and silently rebound the action to it. The pad handler
+   * had the matching problem within a session: the keyboard path ended the
+   * capture without removing it, so it stayed armed with captureAction === null
+   * and threw on the next button press.
+   */
+  private cancelCapture(): void {
+    if (this.captureKeyHandler) {
+      window.removeEventListener('keydown', this.captureKeyHandler, { capture: true });
+      this.captureKeyHandler = null;
+    }
+    if (this.capturePadHandler) {
+      this.input.gamepad?.off('down', this.capturePadHandler);
+      this.capturePadHandler = null;
+    }
+    if (this.captureTimer) {
+      this.time.removeEvent(this.captureTimer);
+      this.captureTimer = null;
+    }
     this.isCapturing = false;
     this.captureAction = null;
+  }
+
+  private endCapture(): void {
+    this.cancelCapture();
     this.refreshControlsTab();
     this.refreshUI();
   }
 
   private closeSettings(): void {
+    // Reachable mid-rebind via [ CLOSE ], and scene.stop() is only *queued*, so
+    // drop the capture listeners here rather than waiting for SHUTDOWN.
+    this.cancelCapture();
+
     // main.ts listens for this and re-applies audio + the touch overlay; the CRT
     // pipeline hook picks it up too. Everything else was saved as it was changed.
     this.game.events.emit('settings:changed');

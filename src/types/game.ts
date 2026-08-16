@@ -5,6 +5,16 @@ export const TITLE = 'Title';
 export const SETTINGS = 'Settings';
 export const PAUSE = 'Pause';
 
+/**
+ * C++ constant.txt:511. Every score add in the scripts carries the
+ * `!> MAXIMUM_POSSIBLE_SCORE` clamp — the in-level awards, the laboratory entry
+ * bonus (main_game_controller.txt:509), the decline bonus
+ * (lab_manage_permanent_upgrade_icons.txt:166) and the fly-through
+ * (flythru.txt:35) alike. It lives here so every scene that awards points clamps
+ * against the same number instead of keeping a private copy.
+ */
+export const MAXIMUM_POSSIBLE_SCORE = 9999999;
+
 export enum PaintColor {
   RED = 0,
   GREEN = 1,

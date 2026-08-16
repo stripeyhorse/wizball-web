@@ -21,6 +21,14 @@ export default class GameOverScene extends Phaser.Scene {
   private enteringName: boolean = false;
   private currentMusic: SceneMusic | null = null;
   private firePrev = false;
+  // C++ game_over_screen.txt:25,39-46 — the screen fades in at
+  // opengl_vertex_alpha + 5 per frame and FIRE is only read once it reaches 255,
+  // i.e. 51 frames. Same guard as GetReadyScene.inputLockFrames /
+  // LaboratoryScene.fireLockFrames: a FIRE still held from the level (the
+  // on-screen touch button in particular, which reports as held rather than as a
+  // fresh press) otherwise confirmed on this screen's very first frame — the run
+  // restarted before GAME OVER was ever seen, or filed the score as "YOU".
+  private inputLockFrames: number = 51;
 
   constructor() {
     super({ key: 'GameOver' });
@@ -39,6 +47,7 @@ export default class GameOverScene extends Phaser.Scene {
     this.blinkTimer = 0;
     this.showRestart = true;
     this.firePrev = false;
+    this.inputLockFrames = 51; // C++ game_over_screen.txt:39-46 — FIRE ignored while the screen fades in
     this.currentMusic = null;
     this.nameText = undefined;
     this.restartText = undefined;
@@ -220,6 +229,9 @@ export default class GameOverScene extends Phaser.Scene {
   }
 
   private handleInput(): void {
+    // C++ game_over_screen.txt:41-46 gates the FIRE read on the fade-in, whatever
+    // the input source: SPACE held from the level auto-repeats into this scene too.
+    if (this.inputLockFrames > 0) return;
     if (this.enteringName) {
       if (this.nameInput.length >= 1) {
         this.submitScore();
@@ -242,6 +254,7 @@ export default class GameOverScene extends Phaser.Scene {
 
   // Touch confirm: submit the score (auto-filling the name) or restart.
   private touchConfirm(): void {
+    if (this.inputLockFrames > 0) return;
     if (this.enteringName) {
       if (this.nameInput.length === 0) {
         this.nameInput = 'YOU'; // touch confirm with no input → default name
@@ -253,7 +266,11 @@ export default class GameOverScene extends Phaser.Scene {
   }
 
   update(): void {
-    // On-screen FIRE (mobile) confirms too.
+    if (this.inputLockFrames > 0) this.inputLockFrames--;
+
+    // On-screen FIRE (mobile) confirms too. firePrev is tracked through the lock
+    // as well, so a FIRE held from before the scene change never becomes an edge
+    // once the lock expires — it has to be released and pressed again.
     const fire = !!(window as unknown as { __wizTouch?: Record<string, boolean> }).__wizTouch?.fire;
     if (fire && !this.firePrev) this.touchConfirm();
     this.firePrev = fire;

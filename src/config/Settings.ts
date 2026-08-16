@@ -65,6 +65,13 @@ export class Settings {
   private static instance: Settings;
   private settings: GameSettings;
   private audioHooked = false;
+  // Hand-off from the decorated play() to the decorated add(). Phaser's
+  // BaseSoundManager.play() builds the Sound with a bare `this.add(key)` and
+  // applies the caller's volume only afterwards, via `sound.play(extra)`
+  // (node_modules/phaser/src/sound/BaseSoundManager.js:326-341) — so without
+  // this, every SFX started through `sound.play(key, { volume })` would record
+  // a base of 1 and applyAudio() would re-scale it to full bus level.
+  private pendingBase: number | null = null;
 
   private constructor() {
     this.settings = structuredClone(DEFAULT_SETTINGS);
@@ -141,7 +148,7 @@ export class Settings {
     const originalAdd = mgr.add.bind(mgr);
     mgr.add = (key: string, config?: Phaser.Types.Sound.SoundConfig): Phaser.Sound.BaseSound => {
       const bus: Bus = MUSIC_KEYS.has(key) ? 'music' : 'sfx';
-      const base = config?.volume ?? 1;
+      const base = config?.volume ?? this.pendingBase ?? 1;
       // Scale the config object Phaser keeps as `sound.config`: BaseSound.play()
       // resets currentConfig back to it, so scaling here survives every replay.
       const sound = originalAdd(key, { ...config, volume: base * this.busVolume(bus) }) as BusSound;
@@ -153,16 +160,27 @@ export class Settings {
     const originalPlay = mgr.play.bind(mgr);
     mgr.play = (key: string, extra?: Phaser.Types.Sound.SoundConfig | Phaser.Types.Sound.SoundMarker): boolean => {
       const gain = this.busVolume(MUSIC_KEYS.has(key) ? 'music' : 'sfx');
+      let base = 1;
       if (extra && typeof extra === 'object') {
         if ('config' in extra && extra.config) {
           const marker = extra as Phaser.Types.Sound.SoundMarker;
-          extra = { ...marker, config: { ...marker.config, volume: (marker.config?.volume ?? 1) * gain } };
+          base = marker.config?.volume ?? 1;
+          extra = { ...marker, config: { ...marker.config, volume: base * gain } };
         } else {
           const cfg = extra as Phaser.Types.Sound.SoundConfig;
-          extra = { ...cfg, volume: (cfg.volume ?? 1) * gain };
+          base = cfg.volume ?? 1;
+          extra = { ...cfg, volume: base * gain };
         }
       }
-      return originalPlay(key, extra);
+      // originalPlay() calls add() synchronously, so the Sound it creates picks
+      // this up as its base and a later slider move re-scales from the volume
+      // this call actually asked for, not from 1.
+      this.pendingBase = base;
+      try {
+        return originalPlay(key, extra);
+      } finally {
+        this.pendingBase = null;
+      }
     };
 
     this.applyAudio(game);
@@ -182,10 +200,6 @@ export class Settings {
       if (sound.config) sound.config.volume = level;
       sound.volume = level;
     }
-
-    // Mirror the music bus onto a global so anything that cannot import this
-    // module (or must avoid the import cycle) can still read it.
-    (window as unknown as { __wizMusicGain?: number }).__wizMusicGain = this.musicGain();
   }
 
   /**
@@ -194,8 +208,10 @@ export class Settings {
    * MusicManager streams the soundtrack through a bare <audio> element so the
    * eight MP3s are never decoded into RAM (src/systems/MusicManager.ts) — that
    * element is invisible to Phaser's sound manager, so master/mute cannot reach
-   * it automatically. It has to ask for this value on play and re-apply it when
-   * the game emits 'settings:changed'.
+   * it automatically. It has to apply this factor itself on play and re-apply it
+   * when the game emits 'settings:changed'. This is the one definition of the
+   * formula; MusicManager imports this class already, so it can call it here
+   * rather than keeping a copy that can drift.
    */
   musicGain(): number {
     const a = this.settings.audio;

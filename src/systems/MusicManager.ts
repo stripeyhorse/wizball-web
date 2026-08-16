@@ -65,18 +65,12 @@ let pausedByBlur = false;
 
 // Settings.attachAudio() mixes the SFX bus by wrapping game.sound.add/play, and
 // applyAudio() puts master + mute on the sound manager. Music no longer passes
-// through any of that, so reproduce the same gain here: effective volume =
-// track volume x music bus x master, and mute wins outright.
-// (Settings.ts:194 `busVolume`, Settings.ts:157-166 `applyAudio`.)
-function musicGain(): number {
-  const audio = Settings.getInstance().get().audio;
-  if (audio.muted) return 0;
-  return Phaser.Math.Clamp(audio.master, 0, 1) * Phaser.Math.Clamp(audio.music, 0, 1);
-}
-
+// through any of that, so it has to apply the same gain itself — but by CALLING
+// Settings.musicGain() rather than re-deriving it, because a second copy of the
+// formula silently stops matching the mixer the first time anyone edits one side.
 function applyVolume(): void {
   if (!el) return;
-  el.volume = Phaser.Math.Clamp(baseVolume * musicGain(), 0, 1);
+  el.volume = Phaser.Math.Clamp(baseVolume * Settings.getInstance().musicGain(), 0, 1);
 }
 
 function getElement(): HTMLAudioElement {

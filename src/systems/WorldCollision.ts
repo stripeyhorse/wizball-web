@@ -535,10 +535,26 @@ export default class WorldCollisionMap {
         return 0;
       }
 
+      // world_collision.cpp:1136-1167. The C++ writes the LEFT/UP cases as
+      // `x-(width<<bitshift)` and `y-(height<<bitshift)`, i.e. the NEGATIVE of what is
+      // written here. Those two are self-referential: the walk does `x += result`, so
+      // `result = x-W` gives x := 2x-W, which does not settle on the edge - it doubles
+      // away from it. What makes the C++ nevertheless stop is 32-bit int wraparound:
+      // x_n = W + 2^n*(x_0-W), and once 2^n*(x_0-W) is a multiple of 2^32 the term
+      // vanishes and the walk terminates at EXACTLY x == W (verified by re-running the
+      // unmodified walk with |0 accumulators - it lands on 640/416 in <=32 steps, with
+      // every intermediate value far enough out of bounds to stay in this switch).
+      // JS numbers have no such wraparound, so the walk diverges to +/-Infinity, trips
+      // the safety bound below and reports RESULT_NO_COLLISION - leaving the bottom and
+      // right world edges open while the top and left (which use the already-settling
+      // `-x` / `-y` forms) hold.
+      // Flipping the sign reaches the C++'s converged answer in one step for every
+      // input, so all four edges are solid exactly as COLLISION_*_WORLD_EDGE_SOLID
+      // intends (wizball.txt:164-165 sets both).
       switch (direction) {
         case DIRECTION_LEFT:
           return (worldEdgeHit & COLLISION_HORIZONTAL_WORLD_EDGE_SOLID) !== 0
-            ? x - this.widthInPixels
+            ? this.widthInPixels - x
             : 0;
         case DIRECTION_RIGHT:
           return (worldEdgeHit & COLLISION_HORIZONTAL_WORLD_EDGE_SOLID) !== 0
@@ -546,7 +562,7 @@ export default class WorldCollisionMap {
             : 0;
         case DIRECTION_UP:
           return (worldEdgeHit & COLLISION_VERTICAL_WORLD_EDGE_SOLID) !== 0
-            ? y - this.heightInPixels
+            ? this.heightInPixels - y
             : 0;
         case DIRECTION_DOWN:
           return (worldEdgeHit & COLLISION_VERTICAL_WORLD_EDGE_SOLID) !== 0
@@ -959,12 +975,12 @@ export default class WorldCollisionMap {
 
   // Safety bound for the depth walks below. A legitimate walk is monotonic and leaves the
   // block it is in on every step, so it can never need more than a couple of passes along
-  // the axis. The C++ has no bound: if the walk runs off a world edge INTO the edge (e.g.
-  // DIRECTION_LEFT reaching x<0, which returns x-width and keeps going more negative,
-  // world_collision.cpp:1131-1174) it diverges. In C++ the int eventually wraps; in JS the
-  // coordinate becomes +/-Infinity and, if the block it aliases to is solid, the loop never
-  // terminates and the tab hangs. Tripping the bound returns the walk's current coordinate,
-  // which classifies exactly as the divergent case would have.
+  // the axis, and an out-of-bounds step now settles on the world edge immediately (see
+  // collisionDepth). The C++ has no bound at all (world_collision.cpp:1334-1364) and relies
+  // on int wraparound to escape its self-referential edge cases; JS numbers do not wrap, so
+  // keep the bound as a backstop against a coordinate running away to +/-Infinity and
+  // hanging the tab. Tripping it returns the walk's current coordinate, which classifies
+  // exactly as the divergent case would have.
   private get maxDepthWalkSteps(): number {
     return ((this.width + this.height) * 2) + 16;
   }

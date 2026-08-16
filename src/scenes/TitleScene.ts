@@ -32,11 +32,6 @@ export default class TitleScene extends Phaser.Scene {
     // this, every return to the Title appended four more and update() called
     // setVisible() on destroyed objects.
     this.creditLogos = [];
-    this.settingsOpen = false;
-    // Everything from the previous visit was destroyed on shutdown; drop the
-    // stale references too, or each return to the Title appends four more and
-    // update() calls setVisible() on destroyed game objects.
-    this.creditLogos = [];
 
     // Black backdrop (pillarbox bars), then the original Amiga title art
     // (Ocean / Sensible Software, 1987), scaled to fit preserving aspect.

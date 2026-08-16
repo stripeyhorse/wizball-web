@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { GAME, PAUSE } from '../types/game';
+import { GAME, PAUSE, MAXIMUM_POSSIBLE_SCORE } from '../types/game';
 import { WeaponFlag } from '../types/game';
 import { InputManager } from '../systems/InputManager';
 import { getCauldronTarget, MAX_CAULDRON_CAPACITY, STAGES_PER_LEVEL } from '../data/cauldronTargets';
@@ -128,8 +128,6 @@ const BULLET_FRAME_LITTLE = 'bullets_4';
 const BULLET_RETIRE_DISTANCE = 344;
 const BULLET_RETIRE_TOP = -16;
 const BULLET_RETIRE_BOTTOM = 432;
-// C++ constant.txt:511 — every score add in the C++ is clamped to this.
-const MAXIMUM_POSSIBLE_SCORE = 9999999;
 // C++ constant.txt:233 — enemies_shot_in_a_row rolls over into a bonus pearl here.
 const ENEMIES_KILLED_PER_BONUS_ICON = 10;
 
@@ -166,6 +164,17 @@ const CATELLITE_SPAWN_Y = 16;
 const CATELLITE_WINDOW_MIN_X = 16;
 const CATELLITE_WINDOW_MAX_X = 624;
 const CATELLITE_MAX_Y = 356;
+// C++ catellite.txt:116 — COLLISION_VERTICAL_WORLD_EDGE_SOLID makes the map's top
+// AND bottom edges solid for the cat (world_collision.cpp:1379 tests y<0 as well as
+// y>=height), so the script's `world_y > 356` at :186 is only the lower half of the
+// bound; the engine supplies the upper one. The cat's frame is 24×24 with a 12,12
+// pivot (sprites/catellite[arb].txt), i.e. UPPER 12 / LOWER 11 — which is exactly
+// why 356 is the floor on a 368-tall map (356 + 11 = 367), and 12 the ceiling.
+const CATELLITE_MIN_Y = 12;
+// C++ catellite.txt:12-13 / :200-206 — the cat trails 64 px behind the ball, but
+// tucks in to 24 px while the ball is being sucked into a warp tube.
+const CATELLITE_HORIZONTAL_LAG_DISTANCE = 64;
+const CATELLITE_CLOSE_HORIZONTAL_LAG_DISTANCE = 24;
 // C++ catellite.txt:304-307 — the mutant cat picks a random spot near the wizball
 // every 60-120 frames and drifts to it.
 const MUTANT_CAT_X_RANGE = 256;
@@ -234,6 +243,12 @@ export default class GameScene extends Phaser.Scene {
   private catelliteOverrideReverseFire: boolean = false;       // C++ override_reverse_fire (v37)
   private catelliteFollowingState: boolean = false;            // C++ catellite_following_state
   private catSpreadFlipSide: boolean = false;                  // C++ catellite flip_vertical_firing_side (v8)
+  // C++ catellite x_vel/y_vel: the cat is an engine-moved entity, so its velocity
+  // PERSISTS between frames. Every movement branch rewrites it except the piloted
+  // one while the ball is warping (catellite.txt:329 skips the whole block), which
+  // is the one case where last frame's value has to be re-applied.
+  private catelliteVelX: number = 0;
+  private catelliteVelY: number = 0;
   // C++ catellite.txt:303-311 — mutant drift target, re-rolled every 60-120 frames.
   private mutantCatXOffset: number = 0;
   private mutantCatTargetY: number = MUTANT_CAT_MIN_Y;
@@ -279,6 +294,11 @@ export default class GameScene extends Phaser.Scene {
   private stageTransitioning: boolean = false; // guards the stage→bonus→lab handoff
   private enemiesKilledThisLevel: number = 0;
   private consecutiveEnemyKills: number = 0; // C++: tracks kills for bonus pearl (every 10)
+  // C++ function_remove_enemy_from_level_count.txt:10-15 — EVERY decrement of the
+  // level enemy count queues LEVEL_RESET_FLAG_CHECK_ENEMY_COUNT once it reaches 0,
+  // not just the ones that came from a kill. Latched so the check fires on the
+  // transition to zero and not once per frame.
+  private enemyCountZeroHandled: boolean = false;
   private fuzzCounter: number = FUZZ_COUNTER_START; // counts down each frame; spawns a Fuzz at 0
   // C++ shared_next_bullet_alternator (wizball.txt:199, 617-618; catellite.txt:534-551):
   // ONE alternator shared by the wizball and the cat, so with REAR_FIRE the pair
@@ -365,7 +385,11 @@ export default class GameScene extends Phaser.Scene {
     // clamps every warp), so an arrival level outside it can only be a caller bug.
     this.currentLevel = Phaser.Math.Clamp(arrivalLevel, this.minOpenLevel, this.maxOpenLevel);
     this.homeLevel = this.currentLevel; // you start anchored to the level you arrive on
-    this.score = data.score ?? 0;
+    // C++ constant.txt:511 — EVERY score write is clamped with `!> MAXIMUM_POSSIBLE_SCORE`,
+    // including the awards handed out while we are not running (the laboratory entry
+    // bonus at main_game_controller.txt:509, the fly-through at flythru.txt:35), so a
+    // carried-in score is clamped on the way in as well as at every add site.
+    this.score = Phaser.Math.Clamp(data.score ?? 0, 0, MAXIMUM_POSSIBLE_SCORE);
     // C++ wizball.txt:177-179 — every entry into a level from the lab/bonus loop
     // (and every new life) is a wizball_new_life_appear: the current loadout is
     // reset to the permanent one. Tolerate a caller that only knows the old single
@@ -400,6 +424,8 @@ export default class GameScene extends Phaser.Scene {
     this.catelliteFireCooldown = 0;
     this.catelliteFiringDirection = 1;
     this.catelliteOverrideReverseFire = false;
+    this.catelliteVelX = 0;
+    this.catelliteVelY = 0;
     this.catSpreadFlipSide = false;
     this.mutantCatelliteActive = false;
     this.mutantCatDecisionCounter = 0;
@@ -407,6 +433,7 @@ export default class GameScene extends Phaser.Scene {
     this.fireHeldFrames = 0;
     this.fireCooldown = 0;
     this.consecutiveEnemyKills = 0;
+    this.enemyCountZeroHandled = false;
     this.fuzzCounter = FUZZ_COUNTER_START;
     this.currentPickupCount = 0;
     this.hasPaint = false;
@@ -853,6 +880,8 @@ export default class GameScene extends Phaser.Scene {
     this.catelliteIsPlayerControlled = false;
     this.catelliteFollowingState = false;
     this.catelliteFireCooldown = 0;
+    this.catelliteVelX = 0; // a fresh entity starts at rest (catellite.txt has no x_vel/y_vel init)
+    this.catelliteVelY = 0;
     this.fireHeldFrames = 0;
     this.mutantCatelliteActive = false;
     this.mutantCatDecisionCounter = 0;
@@ -961,6 +990,28 @@ export default class GameScene extends Phaser.Scene {
     this.minOpenLevel = Math.max(1, this.maxOpenLevel - OPEN_LEVEL_WINDOW);
   }
 
+  /**
+   * C++ function_remove_enemy_from_level_count.txt:10-15 — it is the level enemy
+   * count reaching ZERO that queues LEVEL_RESET_FLAG_CHECK_ENEMY_COUNT, by any
+   * route and not just a kill: a Fuzz that has flown off the level removes itself
+   * (generic_level_enemy.txt:774-778) and empties the level exactly like the last
+   * kill does. main_game_controller.txt:1155-1174 then spawns the replacement wave,
+   * awards 1000 and plays the spawn sound. The port only re-examined the count in
+   * the kill tween, so a departing Fuzz could leave a level with no enemies at all
+   * — no paint bubbles, no cauldron progress — until the next Fuzz ~45 s later.
+   * Polled right after enemySystem.update() and latched, so it fires once on the
+   * transition to zero and hands off to the same handler a kill uses.
+   */
+  private checkEnemyCountReachedZero(): void {
+    if (this.enemySystem.getActiveEnemyCount() > 0) {
+      this.enemyCountZeroHandled = false;
+      return;
+    }
+    if (this.enemyCountZeroHandled) return;
+    this.enemyCountZeroHandled = true;
+    this.handlePostEnemyRemoval();
+  }
+
   private handlePostEnemyRemoval(): void {
     this.checkLevelCompletion();
 
@@ -1005,6 +1056,13 @@ export default class GameScene extends Phaser.Scene {
         // loadout — lab_manage_permanent_upgrade_icons.txt:28, :170.
         startingLoadout: this.startingLoadout,
         lives: this.lives,
+        // C++ wizball.txt:908-940 — only the wizball_new_life_appear branch tops
+        // wizball_shield_stored_health back up to SHIELD_STARTING_ENERGY (:914);
+        // the bonus-level entry falls to the else at :926-927 and just re-spawns
+        // the bubble over whatever counter survived. So the REMAINDER travels with
+        // the ball. Without this field the bonus level cannot tell "no shield" from
+        // "shield we forgot to send" and has to assume the former.
+        shieldEnergy: this.wizballShieldEnergy,
         levelProgress: this.levelProgress,
         cauldronFill: this.cauldronFill,
         levelCompletion: this.levelCompletion,
@@ -1504,9 +1562,15 @@ export default class GameScene extends Phaser.Scene {
       this
     );
 
-    // Special paintballs vs player (extra life, filth raid, etc.)
+    // Special paintballs (extra life, filth raid, ...) vs the CAT, not the ball.
+    // C++ generic_level_enemy.txt:577-588 — a killed bubble drops exactly ONE
+    // paintdrop, carrying either a colour or a special bonus, so the special IS the
+    // paint drop; paintdrop.txt:108's `IF collided_entity.COLLIDE_TYPE &
+    // ENT_TYPE_CATELLITE` encloses the plain-paint branch AND the whole
+    // `switch special_bonus_flag` at :130-168. The wizball's COLLIDE_WITH
+    // (wizball.txt:151-153) has no ENT_TYPE_PAINTDROP in it at all.
     this.physics.add.overlap(
-      this.player,
+      this.catellite,
       this.specialPaintballGroup,
       this.collectSpecialPaintball,
       undefined,
@@ -1586,8 +1650,18 @@ export default class GameScene extends Phaser.Scene {
     this.specialPaintballGroup.add(sprite);
   }
 
-  private collectSpecialPaintball(_player: any, paintball: any): void {
+  private collectSpecialPaintball(_collector: any, paintball: any): void {
+    // C++ paintdrop.txt:108 — only an ENT_TYPE_CATELLITE collects. Belt-and-braces
+    // in case the cat's body is still live for a frame after it is lost.
+    if ((this.weaponCollection & WeaponFlag.CATELLITE) === 0 || !this.catellite.visible) return;
+
     const sprite = paintball as Phaser.Physics.Arcade.Sprite;
+    // C++ paintdrop.txt:173 kills the entity the instant it is collected; the port
+    // fades it out over 200 ms with its body still live, so without this latch the
+    // overlap re-fires every frame of the tween — a dozen extra lives off one drop.
+    if ((sprite as any)._collected) return;
+    (sprite as any)._collected = true;
+
     const type = (sprite as any).specialType as SpecialPaintballType;
 
     // Visual pickup effect
@@ -2300,6 +2374,16 @@ export default class GameScene extends Phaser.Scene {
 
     this.spawnCatBullet(this.catellite.x + dir * 8, this.catellite.y, dir * BULLET_SPEED, 0);
 
+    // C++ catellite.txt:549-551 — the write-back sits OUTSIDE the
+    // `if override_reverse_fire = FALSE` guard, gated only on REAR_FIRE. When the
+    // alternator was read above the two writes cancel (:535 negates, this restores),
+    // but when the player is STEERING the cat the C++ skips the negate and only this
+    // write runs, stamping the shared alternator with the direction you just pushed —
+    // so the wizball's next rear-fire shot is pulled the same way.
+    if ((this.weaponCollection & WeaponFlag.REAR_FIRE) !== 0) {
+      this.sharedNextBulletAlternator = dir;
+    }
+
     if (this.cache.audio.exists('wizball_or_cat_fire_normal')) {
       this.sound.play('wizball_or_cat_fire_normal', { volume: 0.25 });
     }
@@ -2772,8 +2856,11 @@ export default class GameScene extends Phaser.Scene {
     // catelliteIsPlayerControlled is set each frame by updateCatelliteControlState()
     // (FIRE held >= threshold), called before updateMovement() in update().
 
-    // C++ catellite target: 64px behind wizball on the horizontal axis
-    const catelliteHorizontalLagDistance = 64;
+    // C++ catellite.txt:200-206 — the follow target is 64 px behind the ball, but
+    // while the ball is being sucked into a tube the cat tucks in to 24 px for the ride.
+    const warping = this.warpTubeSystem.isActive();
+    const catelliteHorizontalLagDistance =
+      warping ? CATELLITE_CLOSE_HORIZONTAL_LAG_DISTANCE : CATELLITE_HORIZONTAL_LAG_DISTANCE;
     const controlledSpeed = CATELLITE_CONTROLLED_HORIZONTAL_SPEED; // 6 px/frame
     const followingSpeed = CATELLITE_FOLLOWING_HORIZONTAL_SPEED; // 4 px/frame
 
@@ -2781,6 +2868,9 @@ export default class GameScene extends Phaser.Scene {
     // the LEFT/RIGHT steering branches set it. (The firing routine above runs
     // first, so it reads last frame's value — exactly as the C++ does.)
     this.catelliteOverrideReverseFire = false;
+
+    const preMoveX = this.catellite.x;
+    const preMoveY = this.catellite.y;
 
     if (this.mutantCatelliteActive) {
       // C++ catellite.txt:283-321 — a mad cat does NOT hunt. It picks a random
@@ -2807,6 +2897,14 @@ export default class GameScene extends Phaser.Scene {
 
       this.catellite.x += cvx;
       this.catellite.y += cvy;
+    } else if (this.catelliteIsPlayerControlled && warping) {
+      // C++ catellite.txt:329 — the ENTIRE d-pad steering block sits inside
+      // `IF getting_sucked_into_a_hole_flag = FALSE`, so a piloted cat stops
+      // answering the stick the moment the ball is taken by a warp tube. The
+      // `let x_vel = 0` at :333 is inside that skipped block too, so the cat simply
+      // coasts on the velocity it already had for the ride.
+      this.catellite.x += this.catelliteVelX;
+      this.catellite.y += this.catelliteVelY;
     } else if (this.catelliteIsPlayerControlled) {
       // C++ catellite.txt:327-364 — direct d-pad control.
       let cvx = 0;
@@ -2874,15 +2972,24 @@ export default class GameScene extends Phaser.Scene {
       }
     }
 
+    // C++ x_vel/y_vel survive into the next frame; remember what this frame actually
+    // applied so the piloted-while-warping branch above has something to coast on.
+    this.catelliteVelX = this.catellite.x - preMoveX;
+    this.catelliteVelY = this.catellite.y - preMoveY;
+
     // C++ catellite.txt:164-190 — the cat is clamped to the CAMERA WINDOW
-    // (camera_x + 16 .. camera_x + 624) and world_y <= 356, with no top clamp, so
-    // it can never be stranded off-screen. Clamping to the whole level instead let
-    // it fall a screen behind and become unreachable.
+    // (camera_x + 16 .. camera_x + 624), never the whole level, so it can't fall a
+    // screen behind and become unreachable. Vertically the script only writes the
+    // floor (`world_y > 356` at :186) because the ceiling is already the engine's:
+    // COLLISION_VERTICAL_WORLD_EDGE_SOLID at :116 makes the map's top edge solid
+    // (world_collision.cpp:1379/:1152-1157 push a DIRECTION_UP overshoot back), and
+    // the cat is moved by x_vel/y_vel, which that collision applies to. The port
+    // hand-places the sprite, so it has to apply both halves itself.
     const cam = this.cameras.main;
     this.catellite.x = Phaser.Math.Clamp(
       this.catellite.x, cam.scrollX + CATELLITE_WINDOW_MIN_X, cam.scrollX + CATELLITE_WINDOW_MAX_X
     );
-    if (this.catellite.y > CATELLITE_MAX_Y) this.catellite.y = CATELLITE_MAX_Y;
+    this.catellite.y = Phaser.Math.Clamp(this.catellite.y, CATELLITE_MIN_Y, CATELLITE_MAX_Y);
 
     // Update the physics body position
     catelliteBody.reset(this.catellite.x, this.catellite.y);
@@ -3079,13 +3186,17 @@ export default class GameScene extends Phaser.Scene {
     // bonus selection, shield fire, movement and tile effects until it finishes.
     const warping = this.warpTubeSystem.isActive();
 
-    if (!warping) {
-      // C++ main loop order (wizball.txt:225-236): movement_routine (which sets
-      // allow_movement) -> firing_routine -> update_wobble. The port's
-      // updateCatelliteControlState() is what computes allow_movement, so it has
-      // to run BEFORE the wobble reads it — it used to run after, one frame stale.
-      this.updateCatelliteControlState();
+    // C++ main loop order (wizball.txt:225-236): movement_routine (which sets
+    // allow_movement) -> firing_routine -> update_wobble. The port's
+    // updateCatelliteControlState() is what computes allow_movement, so it has
+    // to run BEFORE the wobble reads it — it used to run after, one frame stale.
+    // It also runs during a warp: the cat's own IF_INPUT_PLAYER_CONTROL_REPEAT test
+    // (catellite.txt:327) and its `let hit_this_frame = FALSE` (:107) are evaluated
+    // every frame, so releasing FIRE mid-warp really does hand control back. Gating
+    // this on !warping froze both for the whole ~2 s ride.
+    this.updateCatelliteControlState();
 
+    if (!warping) {
       // C++ pattern: check fire_delay_counter FIRST, then handle input based on catellite presence
       if (this.fireCooldown > 0) {
         this.fireCooldown--;
@@ -3125,6 +3236,7 @@ export default class GameScene extends Phaser.Scene {
 
     this.updateCatellite();
     this.enemySystem.update();
+    this.checkEnemyCountReachedZero();
     this.updateFuzzCounter();
     this.updateDisplayScore();
     this.checkExtraLife();

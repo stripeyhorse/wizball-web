@@ -32,6 +32,10 @@ import {
 
 const BITSHIFT = 8;
 const PRIVATE_SCALE = 1 << BITSHIFT;
+// C++ generic_level_enemy.txt:143-144 — velocities are fixed-point per FRAME
+// (x/PRIVATE_SCALE px/frame, so 60/PRIVATE_SCALE gives px/s) but accelerations
+// are fixed-point per frame SQUARED, so gravity needs 60^2, not 60.
+const GRAVITY_SCALE = 3600 / PRIVATE_SCALE;
 
 const MINIMUM_ENEMY_BULLET_SPEED = 1536;
 const MAXIMUM_ENEMY_BULLET_SPEED = 1536;
@@ -144,9 +148,6 @@ const SOLID_DIAMOND_INITIAL_FIRING_DELAY = 200;
 // C++ spawn_molecule_bonus_wave.txt:92-105 — the scatter box is half the spawn
 // box on each axis, capped at this.
 const BONUS_MOLECULE_MAX_DEVIATION = 96;
-
-// Port-only floor on the set-power bounce so a bouncer can never settle.
-const MINIMUM_BOUNCE_SPEED = 768;
 
 interface EnemyData {
   enemyType: EnemyType;
@@ -925,7 +926,13 @@ export default class EnemySystem {
   // enemy that leaves for good instead of recycling (:775-779).
   private enterWaitOffScreen(enemy: Phaser.Physics.Arcade.Sprite, data: EnemyData): void {
     if (data.enemyType === EnemyType.FUZZ) {
+      // :774 — the departing fuzz calls function_remove_enemy_from_level_count,
+      // so its exit can empty the level exactly like the last kill does. The scene
+      // polls getActiveEnemyCount() immediately after enemySystem.update(), so the
+      // emptied level is picked up on this same frame — see
+      // GameScene.checkEnemyCountReachedZero().
       enemy.destroy();
+      this.compactEnemyList();
       return;
     }
 
@@ -1030,7 +1037,9 @@ export default class EnemySystem {
     }
 
     enemy.setVelocity(data.xVelFixed * speedScale, data.yVelFixed * speedScale);
-    body.setGravityY(data.gravityFixed * speedScale);
+    // y_acc is per-frame-squared, so it needs GRAVITY_SCALE (60^2/PRIVATE_SCALE),
+    // not the per-frame velocity scale: 48 fixed = 675 px/s^2, not 11.25.
+    body.setGravityY(data.gravityFixed * GRAVITY_SCALE);
 
     // :937 — restart the firing timer so a re-entering wave doesn't volley at once.
     data.firingCooldown = wave.firingInitialDelay;
@@ -1127,10 +1136,12 @@ export default class EnemySystem {
 
   // C++ generic_level_enemy.txt:302-325 + :771-811 — the on/off-screen lifecycle.
   // Every enemy but the fuzz spawns invisible and non-colliding, waits until it is
-  // genuinely off-screen (>= 368 px from the camera centre), then waits to come
-  // back on-screen (< 344 px) before it starts moving. The main loop re-tests
-  // every frame and recycles the enemy back to its anchor when it scrolls away,
-  // which is what stops all ~60 of a level's enemies being live at once.
+  // off-screen, then waits to come back on-screen before it starts moving. BOTH of
+  // those waits test function_normal_enemy_am_i_on_screen (:785-789, :804-809), so
+  // both use the 344 px ENTRANCE zone; only the ACTIVE main loop's recycle test
+  // (:321-325) calls function_normal_enemy_am_i_off_screen and its 368 px EXIT zone
+  // (constant.txt:140-141). That deliberate 344/368 gap is the hysteresis, and the
+  // recycle is what stops all ~60 of a level's enemies being live at once.
   // Waiting enemies are still ALIVE for the level's enemy count, exactly as in the
   // C++ (function_add_enemy_to_level_count runs at spawn, and only a kill removes
   // them), so getActiveEnemyCount()/maybeSpawnReplacementWave() are unaffected.
@@ -1354,6 +1365,12 @@ export default class EnemySystem {
   // vertical world hit the gravity bouncers recompute their outgoing speed from
   // s = (a * t^2) / 2 so they always come back to exactly their start height.
   // The roof variants (:970-987) mirror it: they are pulled UP and bounce DOWN.
+  // BOTH sides of that division live in the entity's private fixed-point space
+  // (BITSHIFT = 8, :143-144), which is why the C++ shifts the start Y in before
+  // subtracting: dividing a raw PIXEL distance by a fixed-point acceleration
+  // yields a "t" that is sqrt(256) = 16x too small. There is no minimum-speed
+  // clamp in the C++ either — a bouncer that lands back on its own start height
+  // is meant to come off with nothing.
   private bounceVerticallyBySetPower(
     enemy: Phaser.Physics.Arcade.Sprite,
     data: EnemyData,
@@ -1366,15 +1383,17 @@ export default class EnemySystem {
     if (data.waveConfig.verticalPlacement === VERTICAL_BOUNCE_FLOOR) {
       if (!body.blocked.down) return;
 
-      const s = Math.abs(enemy.y - data.startingWorldY) * 2;
+      // :956-961 — s = (y - (BOTTOM_START_Y << bitshift)) * 2
+      const s = Math.abs(enemy.y - data.startingWorldY) * PRIVATE_SCALE * 2;
       const t = Math.sqrt(s / gravity);
-      data.yVelFixed = Math.min(-(gravity * t), -MINIMUM_BOUNCE_SPEED);
+      data.yVelFixed = -(gravity * t);
     } else if (data.waveConfig.verticalPlacement === VERTICAL_BOUNCE_ROOF) {
       if (!body.blocked.up) return;
 
-      const s = Math.abs(data.startingWorldY - enemy.y) * 2;
+      // :974-979 — s = ((TOP_START_Y << bitshift) - y) * 2
+      const s = Math.abs(data.startingWorldY - enemy.y) * PRIVATE_SCALE * 2;
       const t = Math.sqrt(s / gravity);
-      data.yVelFixed = Math.max(gravity * t, MINIMUM_BOUNCE_SPEED);
+      data.yVelFixed = gravity * t;
     } else {
       return;
     }

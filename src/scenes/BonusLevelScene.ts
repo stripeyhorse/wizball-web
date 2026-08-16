@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { WeaponFlag } from '../types/game';
+import { WeaponFlag, MAXIMUM_POSSIBLE_SCORE } from '../types/game';
 import { playSceneMusic } from '../systems/MusicManager';
 
 /**
@@ -148,7 +148,7 @@ const ACC_TO_PX_S2 = 3600 / 256;
 const PLAYER_SPEED = 220;
 
 // Firing constants, matching GameScene (which keeps private copies at
-// src/scenes/GameScene.ts:81-84 — nothing exports them yet, so they are
+// src/scenes/GameScene.ts:117-119 — nothing exports them yet, so they are
 // duplicated here rather than diverging as they did before).
 const BULLET_SPEED = 720;            // px/s — C++ 192 >> 4
 const NORMAL_FIRE_RATE = 20;         // frames — C++ wizball.txt:511
@@ -234,6 +234,15 @@ export default class BonusLevelScene extends Phaser.Scene {
   private levelProgress: number = 0;
   private cauldronFill: number[] = [0, 0, 0, 0];
 
+  // Carried through untouched on the way to the laboratory. This scene has no use
+  // for them, but the banked colour-stage array is authoritative persistent state
+  // in the C++ (LEVEL_COMPLETION_ARRAY_ID, main_game_controller.txt:1075) and has
+  // to survive the level -> bonus -> lab -> level round trip rather than being
+  // re-derived at the other end.
+  private levelCompletion: number[] | undefined = undefined;
+  private minOpenLevel: number | undefined = undefined;
+  private maxOpenLevel: number | undefined = undefined;
+
   // --- gameplay state ---
   private enemiesKilled: number = 0;
   private waveIndex: number = -1; // advanced to 0 on the first go-ahead (mirrors wave_number)
@@ -286,6 +295,9 @@ export default class BonusLevelScene extends Phaser.Scene {
     levelProgress?: number;
     cauldronFill?: number[];
     shieldEnergy?: number;
+    levelCompletion?: number[];
+    minOpenLevel?: number;
+    maxOpenLevel?: number;
   }): void {
     this.level = data.level ?? 1;
     this.score = data.score ?? 0;
@@ -294,13 +306,28 @@ export default class BonusLevelScene extends Phaser.Scene {
     this.lives = data.lives ?? 2;
     this.levelProgress = data.levelProgress ?? 0;
     this.cauldronFill = data.cauldronFill ?? [0, 0, 0, 0];
+    this.levelCompletion = data.levelCompletion;
+    this.minOpenLevel = data.minOpenLevel;
+    this.maxOpenLevel = data.maxOpenLevel;
 
     // C++ wizball.txt:183-189 + pre_equip_wizball :904-957 — the shield comes onto
-    // the bonus level with whatever time it had left. GameScene does not forward
-    // wizball_shield_stored_health yet, so a full shield is assumed when it does not.
+    // the bonus level with whatever time it had LEFT: only the new-life branch tops
+    // wizball_shield_stored_health back up to SHIELD_STARTING_ENERGY (:910-914); the
+    // bonus-level entry falls to the else at :926-927, which just re-spawns the
+    // bubble over the surviving counter. So never refill here — carry the remainder
+    // in and let stepShieldCounter keep burning it down.
+    // (Every C++ write to wizball_shield_stored_health is either the constant or a
+    // decrement — :914, :1067, :1086, :1124 — so it can never exceed the starting
+    // value; the clamp just holds that invariant against a stale payload.)
     this.shieldEnergy = (this.weaponCollection & WeaponFlag.INVULNERABILITY)
-      ? (data.shieldEnergy ?? SHIELD_STARTING_ENERGY)
+      ? Math.min(data.shieldEnergy ?? 0, SHIELD_STARTING_ENERGY)
       : 0;
+    // Keep the bitflag and the counter consistent the way update_shield_counter
+    // does (wizball.txt:1126-1128): no stored health means no shield. This also
+    // covers the case where the caller has not sent shieldEnergy at all — an
+    // unknown remainder must not become a free 2100-frame immunity to the
+    // enemy-contact fail state below.
+    if (this.shieldEnergy === 0) this.weaponCollection &= ~WeaponFlag.INVULNERABILITY;
 
     // reset per-run gameplay state
     this.enemiesKilled = 0;
@@ -435,13 +462,22 @@ export default class BonusLevelScene extends Phaser.Scene {
     this.player.setDisplaySize(32, 32);
     this.player.setDepth(10);
 
+    // Every scene gets its own Arcade world and its bounds default to the CANVAS
+    // (main.ts:18-19 — 640x416, i.e. 368 playable plus the status-bar strip), not
+    // to the playfield. Left unset, the setCollideWorldBounds below would let the
+    // ball sit ~48px under the drawn field, off its own starfield and out of reach
+    // of nearly every wave. C++ wizball.txt:164-165 makes BOTH world edges solid
+    // for the ball, and the bonus field it is bounded against has no out-of-play
+    // band, so bound it to exactly the field everything else is mapped into.
+    this.physics.world.setBounds(0, 0, SCREEN_W, SCREEN_H);
+
     const body = this.player.body as Phaser.Physics.Arcade.Body;
     body.setCircle(12, 4, 4);
     body.setCollideWorldBounds(true);
   }
 
   private createCatellite(): void {
-    // C++ pre_equip_wizball (wizball.txt:940-947) spawns the catellite on the
+    // C++ pre_equip_wizball (wizball.txt:942-948) spawns the catellite on the
     // bonus level too, when the loadout has it.
     if (!(this.weaponCollection & WeaponFlag.CATELLITE)) return;
 
@@ -672,8 +708,11 @@ export default class BonusLevelScene extends Phaser.Scene {
       this.enemiesKilled += 1;
 
       // Per-kill score: 20 + floor(wave_number_in_bonus_level / 3) * 10
-      // (bonus_wave_enemy.txt:789-795).
-      this.score += 20 + Math.floor(st.waveIndex / 3) * 10;
+      // (bonus_wave_enemy.txt:789-795), clamped like every other add site
+      // (constant.txt:511).
+      this.score = Math.min(
+        MAXIMUM_POSSIBLE_SCORE, this.score + 20 + Math.floor(st.waveIndex / 3) * 10
+      );
 
       // BONUS_LIFE enemy grants an extra life, capped at 9 by
       // function_gain_life.txt (`temp_1 + 1 !> 9`).
@@ -1130,7 +1169,7 @@ export default class BonusLevelScene extends Phaser.Scene {
       }
 
       // Vertical world edges are solid with a -100 coefficient for the bouncing
-      // types (bonus_wave_enemy.txt:157, 249-250, 274-275, 395-396).
+      // types (bonus_wave_enemy.txt:156, 246-247, 273-274, 394-395).
       if (st.bounceY) {
         const half = enemy.displayHeight / 2;
         if (enemy.y < half && body.velocity.y < 0) {
@@ -1276,7 +1315,12 @@ export default class BonusLevelScene extends Phaser.Scene {
     this.spawningEnabled = false;
     this.finished = true;
 
-    // Preserve and forward the full init-data contract with the updated score.
+    // Forward the whole init-data contract with the updated score/lives. The
+    // last four are pure pass-through: nothing in this scene reads them, but the
+    // laboratory has to relay them on to GameScene or the state is lost. (As of
+    // writing LaboratoryScene declares neither shieldEnergy nor the level window,
+    // so those four stop there — they are sent so the relay only needs adding at
+    // one end.)
     this.scene.start('Laboratory', {
       level: this.level,
       score: this.score,
@@ -1285,7 +1329,10 @@ export default class BonusLevelScene extends Phaser.Scene {
       lives: this.lives,
       levelProgress: this.levelProgress,
       cauldronFill: this.cauldronFill,
-      shieldEnergy: this.shieldEnergy
+      shieldEnergy: this.shieldEnergy,
+      levelCompletion: this.levelCompletion,
+      minOpenLevel: this.minOpenLevel,
+      maxOpenLevel: this.maxOpenLevel
     });
   }
 
