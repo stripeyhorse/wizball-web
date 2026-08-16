@@ -199,7 +199,6 @@ export default class EnemySystem {
   private playerRef: Phaser.Physics.Arcade.Sprite | null = null;
 
   private currentLevel: number = 1;
-  private currentLevelWidth: number = 640;
   private waveSpawnSlots: WaveSpawnSlot[] = [];
   private moleculeSpawnSlots: MoleculeSpawnSlot[] = [];
   private moleculePhaseActive: boolean = false;
@@ -278,7 +277,6 @@ export default class EnemySystem {
   spawnInitialEnemies(level: number): void {
     this.clearEnemies();
     this.currentLevel = level;
-    this.currentLevelWidth = this.scene.cameras.main.getBounds().right;
     this.moleculePhaseActive = level <= 3 && this.moleculeSpawnSlots.length > 0;
 
     if (this.moleculePhaseActive) {
@@ -292,14 +290,12 @@ export default class EnemySystem {
   spawnEnemies(level: number): void {
     this.clearEnemies();
     this.currentLevel = level;
-    this.currentLevelWidth = this.scene.cameras.main.getBounds().right;
     this.moleculePhaseActive = false;
     this.spawnRegularEnemies(level);
   }
 
   private spawnRegularEnemies(level: number): void {
     this.currentLevel = level;
-    this.currentLevelWidth = this.scene.cameras.main.getBounds().right;
     // Every shipped tilemap carries RANDOM_ENEMY_WAVE_SELECTION spawn points; if
     // one somehow doesn't, the C++ simply has no waves on that level.
     this.spawnConfiguredWaveSet(level);
@@ -1389,7 +1385,7 @@ export default class EnemySystem {
   // s = (a * t^2) / 2 so they always come back to exactly their start height.
   // The roof variants (:970-987) mirror it: they are pulled UP and bounce DOWN.
   // BOTH sides of that division live in the entity's private fixed-point space
-  // (BITSHIFT = 8, :143-144), which is why the C++ shifts the start Y in before
+  // (BITSHIFT = 8, :144), which is why the C++ shifts the start Y in before
   // subtracting: dividing a raw PIXEL distance by a fixed-point acceleration
   // yields a "t" that is sqrt(256) = 16x too small. There is no minimum-speed
   // clamp in the C++ either — a bouncer that lands back on its own start height
@@ -1401,17 +1397,36 @@ export default class EnemySystem {
   // the bouncer FELL AWAY FROM its start line towards the surface it just hit, so
   // s > 0 on any normal bounce. If the contact happens on the far side of the
   // start line (a floor bouncer resting ABOVE its own start height, e.g. sat on a
-  // tile) s goes negative, the C++ then divides by the signed y_acc and feeds the
-  // result to `sqr`/`sqr -` as a NEGATIVE number, and an integer square root of a
-  // negative yields no launch at all. Math.abs() instead handed it real climb
-  // energy out of |s|: measured at an s = -48 px contact, Math.abs() launched the
-  // bouncer at -265.2 px/s and it rose 50.4 px off the surface, where the signed
-  // form launches at 0 and it rises 0.4 px. Clamping s <= 0 to t = 0 is the
-  // faithful port. Ordinary s > 0 bounces are untouched by the change (same
-  // contact, launch -388.08 px/s before vs -388.84 after — pure 60Hz jitter).
+  // tile) s goes negative, the C++ then divides by the signed y_acc and hands
+  // `sqr` a negative.
+  //
+  // What the reference engine does with THAT is not a graceful "no launch", and
+  // this comment used to claim it was. `sqr` is the MATH_SQR opcode, and the
+  // interpreter implements it as `result_i = int (sqrt (first_value))` over an
+  // `int` (wizball/scripting.cpp:4798 declares first_value; the opcode is at
+  // :5890-5891, repeated verbatim at :6314-6315 and :6527-6528). That is
+  // int(NaN) — undefined behaviour, which on x86-64 lands on INT_MIN; compiling
+  // exactly that expression gives -2147483648 at both -O0 and -O2. So the C++
+  // has no defined answer for s < 0, not a zero one. Nor is the ROOF branch's
+  // `sqr -temp_2` a guard against it: a roof bouncer's y_acc is negative
+  // (STARTING_Y_ACC = -passed_in_gravity, generic_level_enemy.txt:261-263), so
+  // temp_2 comes out of the divide negative on a NORMAL roof bounce and the
+  // unary minus is only putting it back the right way up.
+  //
+  // Which is why clamping s <= 0 to t = 0 is a choice about a branch nothing
+  // has been seen to reach, rather than a port of a defined behaviour — and it
+  // is safe to make on that evidence: a reachability sweep of real floor/roof
+  // contacts on levels 4/6/8 found 0 of 229 with s <= 0 (minimum s = 13.6 px,
+  // so nowhere near it). Math.abs(), which is what this used
+  // to do, is the one demonstrably wrong option, because it hands the bouncer
+  // real climb energy out of |s|: measured at a forced s = -48 px contact,
+  // Math.abs() launched at -265.2 px/s and rose 50.4 px off the surface, where
+  // the clamped signed form launches at 0 and rises 0.4 px. Ordinary s > 0
+  // bounces are untouched either way (same contact, launch -388.08 px/s before
+  // vs -388.84 after — pure 60Hz jitter).
   //
   // The C++ finishes with `y_vel = y_vel * temp_1` where `temp_1 = sgn y_vel`
-  // sampled at :955/:973 — i.e. AFTER .world_interaction_routine's caller has
+  // sampled at :954/:972 — i.e. AFTER .world_interaction_routine's caller has
   // already reflected the velocity off the surface ("the direction we'll be
   // moving off in"). That is always up for a floor bounce and always down for a
   // roof bounce, which is exactly the hard-coded sign on data.yVelFixed below, so

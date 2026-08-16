@@ -9,6 +9,27 @@ interface UpgradeOption {
   label: string;
 }
 
+// C++ constant.txt:217 — 2100 frames of shield (~30s at 60Hz).
+const SHIELD_STARTING_ENERGY = 2100;
+// Every C++ write to wizball_shield_stored_health / cat_shield_stored_health is
+// either that constant or a `!< 0` decrement (wizball.txt:914, :920, :1067-1098,
+// :1122-1132, plus the on-hit penalties in wizball_shield_bubble_layer.txt:137-139
+// and catellite_shield_swirl_layer.txt:115-117), so [0, SHIELD_STARTING_ENERGY] is
+// the invariant to hold on a payload we did not produce. Number.isFinite() first: a
+// NaN loses every comparison and would survive a bare Math.min with the bitflag
+// still set, i.e. a shield that never expires.
+//
+// The C++ globals are INTEGER counters decremented by exactly 1 a frame
+// (wizball.txt:1123 `let temp_1 = temp_1 - 1 !< 0`), so the range is not the whole
+// invariant — integrality is too. A fractional remainder (3.5, say) walks straight
+// past every `=== 0` test forever: 3.5 -> 2.5 -> ... -> -0.5, counter negative and
+// bitflag still set, which is precisely the "flag with nothing behind it" state this
+// helper exists to make unrepresentable. Math.trunc pins it to the C++'s integers.
+const clampShieldEnergy = (v: number | undefined): number =>
+  Number.isFinite(v)
+    ? Math.trunc(Math.min(Math.max(v as number, 0), SHIELD_STARTING_ENERGY))
+    : 0;
+
 export default class LaboratoryScene extends Phaser.Scene {
   private level: number = 1;
   private score: number = 0;
@@ -32,6 +53,29 @@ export default class LaboratoryScene extends Phaser.Scene {
   private levelCompletion?: number[];
   private minOpenLevel?: number;
   private maxOpenLevel?: number;
+  // The two shield counters are C++ globals and NOTHING in the laboratory touches
+  // them — lab_manage_permanent_upgrade_icons.txt contains no shield reference at
+  // all. A repo-wide grep finds writes only at wizball.txt:914/:920 (new life),
+  // :1067/:1076-1079/:1086/:1095-1098 (the invulnerability pearl), the per-frame
+  // decrement in update_shield_counter (:1122-1132) and the two on-hit penalties
+  // (wizball_shield_bubble_layer.txt:137-139, catellite_shield_swirl_layer.txt:
+  // 115-117). So the remainders simply persist across a lab visit, and this scene
+  // is a pass-through for them exactly like the level window above. Not relaying
+  // them zeroed both counters on the way back to GameScene while weaponCollection
+  // still carried the matching INVULNERABILITY bitflags — a shield the next level
+  // claimed but had no time behind.
+  private shieldEnergy: number = 0;
+  private catShieldEnergy: number = 0;
+  // C++ player_display_score is global across the lab too — start_game.txt:5 is the
+  // only place it is zeroed — and it rolls toward player_score after re-entry,
+  // awarding a life on every 100,000 barrier the roll crosses
+  // (manage_score_and_enemy_display.txt:30-60). The lab hands out points (+2000 on
+  // entry, the decline bonus, +7490 on fly-through) while the display score stands
+  // still, so those barriers are crossed by the roll on the OTHER side of this
+  // scene: drop the field and GameScene re-seeds its sector from the new total and
+  // never pays the life. Relayed untouched, `undefined` included — GameScene owns
+  // the default, we do not invent one.
+  private displayScore?: number;
   private options: UpgradeOption[] = [];
   private selectedIndex: number = 0;
   private icons: Phaser.GameObjects.Image[] = [];
@@ -57,6 +101,7 @@ export default class LaboratoryScene extends Phaser.Scene {
     level: number; score?: number; weaponCollection?: number; lives?: number;
     levelProgress?: number; cauldronFill?: number[]; startingLoadout?: number;
     levelCompletion?: number[]; minOpenLevel?: number; maxOpenLevel?: number;
+    shieldEnergy?: number; catShieldEnergy?: number; displayScore?: number;
   }): void {
     this.level = data.level || 1;
     this.score = data.score || 0;
@@ -71,6 +116,37 @@ export default class LaboratoryScene extends Phaser.Scene {
     this.levelCompletion = data.levelCompletion ? [...data.levelCompletion] : undefined;
     this.minOpenLevel = data.minOpenLevel;
     this.maxOpenLevel = data.maxOpenLevel;
+    // The rolling display score rides through the lab, but it is still a payload
+    // field we did not produce, and the invariant
+    // manage_score_and_enemy_display.txt:30-59 maintains is display <= score: a
+    // display that LEADS the real score re-crosses a 100,000 boundary on the way
+    // back down and pays a life that was never earned. Clamped against the score as
+    // it arrived — this runs before the +2000 lab award below, so the award stays
+    // ahead of the roll and GameScene still pays the crossing it causes.
+    //
+    // Materialised rather than relayed as undefined when the caller sends nothing:
+    // GameScene's `?? this.score` fallback would then seed the display from the
+    // POST-lab total and swallow exactly that crossing (see its init()). Non-finite
+    // input takes the same fallback — NaN loses every comparison and would sail
+    // through Phaser.Math.Clamp unchanged, poisoning lastScoreSector with NaN.
+    this.displayScore = Number.isFinite(data.displayScore)
+      ? Phaser.Math.Clamp(data.displayScore as number, 0, this.score)
+      : this.score;
+    // Carry the shield remainders; never refill them, because there is no lab-side
+    // top-up in the C++ (only wizball.txt:914/:920 on a new life and the pearl at
+    // :1067-1098 write SHIELD_STARTING_ENERGY). Keep each bitflag consistent with
+    // its counter the way update_shield_counter does (wizball.txt:1126-1128 and
+    // :1134-1136): no stored health means no shield. That also covers a caller that
+    // sends no remainder at all — relaying a set flag over a zeroed or absent
+    // counter is the bug this relay closes, not one to recreate.
+    this.shieldEnergy = (this.weaponCollection & WeaponFlag.INVULNERABILITY)
+      ? clampShieldEnergy(data.shieldEnergy)
+      : 0;
+    if (this.shieldEnergy === 0) this.weaponCollection &= ~WeaponFlag.INVULNERABILITY;
+    this.catShieldEnergy = (this.weaponCollection & WeaponFlag.CATELLITE_INVULNERABILITY)
+      ? clampShieldEnergy(data.catShieldEnergy)
+      : 0;
+    if (this.catShieldEnergy === 0) this.weaponCollection &= ~WeaponFlag.CATELLITE_INVULNERABILITY;
     // C++ main_game_controller.txt:508-510 — entering the lab awards +2000, and
     // :509 is `let temp_2 = temp_2 + 2000 !> MAXIMUM_POSSIBLE_SCORE`: the clamp is
     // on the add site itself, not left to whoever reads the score next.
@@ -235,7 +311,31 @@ export default class LaboratoryScene extends Phaser.Scene {
       }
     } else {
       // C++ lab_manage_permanent_upgrade_icons.txt:158-167 — declining the bonus
-      // awards level-scaled points instead, clamped at :166.
+      // ("No bonus = lotsa' points! Ish.") awards points instead.
+      //
+      // KNOWN DIVERGENCE, deliberately left in place. The original contains a
+      // typo: :161 reads player_on_level_number into temp_3 and :162 immediately
+      // clobbers it with `9 - temp_2` — almost certainly meant to be `9 - temp_3`.
+      // temp_2 is unassigned at that point (its first write in the file is :165),
+      // and it resolves to a determinate 0, not junk: temp_2 is ENT_TEMP_2, a
+      // per-entity slot, and every spawn memcpys the global `reset_entity` over an
+      // entity's variables (scripting.cpp:545); reset_entity is zeroed at boot
+      // (scripting.cpp:3036) and its only non-zero writer is the prefab path
+      // (scripting.cpp:10001), which this game never uses — `grep -rn prefab
+      // wizball/scripts/` finds nothing. So the original awards a flat 9000 at
+      // every level, and the level read at :161 is dead code.
+      //
+      // This port implements the EVIDENT INTENT, (9 - level) * 1000, which pays
+      // 8000 on level 1 down to 1000 on level 8. That is a real scoring
+      // difference of up to 8000 per decline, and it moves which 100,000
+      // extra-life boundaries get crossed. Switching to a flat 9000 would be the
+      // parity-faithful choice — the same call this port already makes for the
+      // world-edge wraparound in WorldCollision.ts — and is a one-line change
+      // here. It is a gameplay decision, not a bug to be quietly "fixed" in
+      // either direction: two earlier passes rewrote this comment with a
+      // different wrong claim each time.
+      //
+      // The MAXIMUM_POSSIBLE_SCORE clamp matches the add site at :166.
       this.score = Math.min(
         MAXIMUM_POSSIBLE_SCORE, this.score + Math.max(0, (9 - this.level)) * 1000
       );
@@ -262,6 +362,7 @@ export default class LaboratoryScene extends Phaser.Scene {
   private buildPayload(): {
     score: number; weaponCollection: number; startingLoadout: number; lives: number;
     levelCompletion?: number[]; minOpenLevel?: number; maxOpenLevel?: number;
+    shieldEnergy: number; catShieldEnergy: number; displayScore?: number;
   } {
     return {
       score: this.score,
@@ -276,7 +377,14 @@ export default class LaboratoryScene extends Phaser.Scene {
       // GameScene.init() fall into its reconstruction fallback on every lab exit.
       levelCompletion: this.levelCompletion,
       minOpenLevel: this.minOpenLevel,
-      maxOpenLevel: this.maxOpenLevel
+      maxOpenLevel: this.maxOpenLevel,
+      // Globals in the C++, so pass-throughs here (see the field declarations):
+      // the shield remainders and the rolling display score all have to survive the
+      // lab or the next level starts with a shield of zero frames and a score
+      // barrier that never pays its life.
+      shieldEnergy: this.shieldEnergy,
+      catShieldEnergy: this.catShieldEnergy,
+      displayScore: this.displayScore
     };
   }
 

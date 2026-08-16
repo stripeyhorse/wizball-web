@@ -27,6 +27,23 @@ const ACTION_LABELS: Record<ActionName, string> = {
   pause: 'Pause',
 };
 
+// The original's set of redefinable controls, taken verbatim from the data:
+// datatables/defined_key_indexes.txt:6 is `#DATA 0,1,2,3,5,6`, which against the
+// control constants in global_parameter_list.txt:1405-1411 reads UP(0), DOWN(1),
+// LEFT(2), RIGHT(3), FIRE_1(5), FIRE_2(6) — the six rows named in
+// textfiles/menu.txt:67-72 (UP / DOWN / LEFT / RIGHT / FIRE / SELECT BONUS), and
+// the six that menu_define_keys.txt:82 counts before it stops asking.
+//
+// PAUSE is control 9 (global_parameter_list.txt:1414) and is deliberately absent
+// from that table — the original never let you move it, only
+// define_default_controls.txt:7 set it. Neither do we, and here that is more than
+// parity: PauseScene.ts:127 is the only in-game route into this menu, so a Pause
+// key the player could move (or, before this round, unbind) was a way to lock
+// yourself out of Settings for the rest of the run.
+const DEFINABLE_ACTIONS: ReadonlySet<ActionName> = new Set<ActionName>([
+  'moveUp', 'moveDown', 'moveLeft', 'moveRight', 'fire', 'altFire',
+]);
+
 const KEY_NAMES: Record<number, string> = {
   [Phaser.Input.Keyboard.KeyCodes.LEFT]: 'LEFT',
   [Phaser.Input.Keyboard.KeyCodes.RIGHT]: 'RIGHT',
@@ -69,6 +86,20 @@ export default class SettingsScene extends Phaser.Scene {
   private isCapturing: boolean = false;
   private captureAction: ActionName | null = null;
 
+  // Controls the player has successfully rebound since opening this screen —
+  // the port's stand-in for the original's per-control duplication flag.
+  // menu_define_keys.txt:54 clears SET_DEFINING_DUPLICATION_CHECK for EVERY
+  // definable control as the list is drawn, and :74 sets it true only once that
+  // control has been accepted in the current pass. So a key is refused (:69,
+  // DEFINE_PLAYER_CONTROL_FROM_KEYPRESS returns false and the loop re-prompts)
+  // only when it clashes with a control ALREADY redefined this visit — never
+  // with one the player has not reached yet, and never with a non-definable
+  // control like Pause, which is absent from defined_key_indexes and so never
+  // has the flag set at all. Checking live bindings instead makes a plain swap
+  // impossible: with the defaults fire=SPACE / altFire=Z, arming Fire and
+  // pressing Z is rejected, and so is the reverse.
+  private redefinedThisVisit: Set<ActionName> = new Set();
+
   // A rebind arms listeners that live *outside* this scene — `window` for the
   // raw keydown and the game-wide GamepadPlugin — so they are held here and
   // torn down by cancelCapture(). See the comment on that method.
@@ -96,7 +127,6 @@ export default class SettingsScene extends Phaser.Scene {
     down: Phaser.Input.Keyboard.Key;
     left: Phaser.Input.Keyboard.Key;
     right: Phaser.Input.Keyboard.Key;
-    back: Phaser.Input.Keyboard.Key;
     tabNext: Phaser.Input.Keyboard.Key;
     tabPrev: Phaser.Input.Keyboard.Key;
   };
@@ -114,10 +144,14 @@ export default class SettingsScene extends Phaser.Scene {
 
   create(): void {
     this.settings = Settings.getInstance();
+    this.repairUnboundKeys();
     this.activeTab = 0;
     this.selectedRow = 0;
     this.isCapturing = false;
     this.captureAction = null;
+    // menu_define_keys.txt:54 — every definable control starts the screen with
+    // its duplication flag clear, so nothing blocks until it has been rebound.
+    this.redefinedThisVisit.clear();
     // Scene objects are destroyed on shutdown; drop the stale references too so
     // a second visit doesn't refresh/highlight the previous visit's Text objects.
     this.tabTexts = [];
@@ -142,15 +176,29 @@ export default class SettingsScene extends Phaser.Scene {
       t.setPadding(10, 8, 10, 8);
       t.setInteractive({ useHandCursor: true });
       // Disarms an in-flight rebind rather than ignoring the tap — the scene-wide
-      // rule documented on startKeyCapture(). This used to `return` while
-      // isCapturing, on the grounds that refreshUI() would wipe the "Press a key"
-      // prompt out from under an armed capture; cancelling first makes that wipe
-      // correct instead of dangerous, and a tab header that visibly does nothing
-      // reads as a broken button on touch. [ CLOSE ] has always cancelled rather
-      // than ignored, so this is now consistent with it.
+      // rule documented on startKeyCapture(). Ignoring it (the original
+      // behaviour) left a tab header that visibly did nothing, which reads as a
+      // broken button on touch, and left refreshUI() free to wipe the "Press a
+      // key" prompt out from under a capture that was still armed. [ CLOSE ] has
+      // always cancelled rather than ignored, so this is consistent with it.
       t.on('pointerdown', () => {
-        this.cancelCapture();
-        this.activeTab = i; this.selectedRow = 0; this.refreshUI();
+        if (this.isCapturing) {
+          // The first input after "Press a key" belongs to the capture, whichever
+          // device it comes from. A tap cannot *be* a binding, so all it can do is
+          // disarm — but it stops there rather than also switching tab, because a
+          // keypress cannot switch tab either: Q and E are legal bindings, so the
+          // window listener below swallows them and they never reach update().
+          // Round 1 had the tap switch as well, which let the mouse do something
+          // mid-capture that the keyboard provably could not. Tap again to switch.
+          this.cancelCapture();
+          this.refreshUI();
+          this.captureStatusText.setText('Rebind cancelled');
+          return;
+        }
+        // Only move the selection when the tab actually changes — tapping the
+        // header you are already on used to silently jump you back to row 0.
+        if (i !== this.activeTab) { this.activeTab = i; this.selectedRow = 0; }
+        this.refreshUI();
       });
       return t;
     });
@@ -191,7 +239,6 @@ export default class SettingsScene extends Phaser.Scene {
       down: kb.addKey(Phaser.Input.Keyboard.KeyCodes.DOWN, false),
       left: kb.addKey(Phaser.Input.Keyboard.KeyCodes.LEFT, false),
       right: kb.addKey(Phaser.Input.Keyboard.KeyCodes.RIGHT, false),
-      back: kb.addKey(Phaser.Input.Keyboard.KeyCodes.ESC, false),
       tabNext: kb.addKey(Phaser.Input.Keyboard.KeyCodes.E, false),
       tabPrev: kb.addKey(Phaser.Input.Keyboard.KeyCodes.Q, false),
     };
@@ -204,6 +251,19 @@ export default class SettingsScene extends Phaser.Scene {
     // honour requestFullscreen(). Polling it from update() ran in a rAF tick,
     // where the request is rejected and Phaser swallows the failure.
     kb.on('keydown-ENTER', this.onConfirmKey, this);
+
+    // ESC is an event for a different reason: polling it with JustDown() in
+    // update() *loses* a quick tap. KeyboardManager queues keydown and keyup, and
+    // KeyboardPlugin.update() drains the entire queue in one pass
+    // (node_modules/phaser/src/input/keyboard/KeyboardPlugin.js:731-744), so when
+    // both land in the same frame the keyup's Key.onUp clears `_justDown`
+    // (node_modules/phaser/src/input/keyboard/keys/Key.js:318, called from
+    // KeyboardPlugin.js:815) before update() ever gets to read it. The emitted
+    // `keydown-ESC` fires during that same drain (KeyboardPlugin.js:801) and so
+    // cannot be overtaken. Measured before this change: 5 of 12 open/ESC-close
+    // cycles left the menu open — which is what "Settings reopen is flaky"
+    // actually was. The *close* was dropped, so the next open looked like a no-op.
+    kb.on('keydown-ESC', this.onBackKey, this);
 
     // The Fullscreen row reads this.scale.isFullscreen, which only flips once
     // the browser fires fullscreenchange — after our toggle has returned. The
@@ -232,12 +292,15 @@ export default class SettingsScene extends Phaser.Scene {
   }
 
   update(): void {
-    if (this.isCapturing) return; // Don't navigate while capturing
+    // Nothing here can run mid-capture anyway: the window listener armed by
+    // startKeyCapture() sits in the capture phase and calls stopPropagation(), so
+    // Phaser's bubble-phase KeyboardManager listener
+    // (node_modules/phaser/src/input/keyboard/KeyboardManager.js:230) never queues
+    // the event and none of these keys change state. This guard just makes that
+    // explicit — and matches the tab headers, which also refuse to act on the
+    // input that ends a capture.
+    if (this.isCapturing) return;
 
-    if (Phaser.Input.Keyboard.JustDown(this.navKeys.back)) {
-      this.closeSettings();
-      return;
-    }
     if (Phaser.Input.Keyboard.JustDown(this.navKeys.tabNext)) {
       this.activeTab = (this.activeTab + 1) % TABS.length;
       this.selectedRow = 0;
@@ -273,6 +336,14 @@ export default class SettingsScene extends Phaser.Scene {
     if (event.repeat || this.isCapturing) return;
     event.preventDefault();
     this.activateItem();
+  }
+
+  // No preventDefault: ESC is also the browser's own way out of fullscreen, and
+  // that one cannot be cancelled anyway. isCapturing is belt-and-braces — an ESC
+  // during a rebind is eaten by the window listener and cancels the capture there.
+  private onBackKey(event: KeyboardEvent): void {
+    if (event.repeat || this.isCapturing) return;
+    this.closeSettings();
   }
 
   // Rows double as touch targets: tapping one selects and activates it, and
@@ -337,7 +408,7 @@ export default class SettingsScene extends Phaser.Scene {
     const hint = this.make.text({
       x: 320, y: 240,
       text: 'LEFT / RIGHT adjusts by 10%. Tap a row to nudge it up.',
-      style: { fontSize: '10px', color: '#777777', fontFamily: 'monospace' },
+      style: { fontSize: '10px', color: '#8a8a8a', fontFamily: 'monospace' },
     });
     hint.setOrigin(0.5);
     this.audioContainer.add(hint);
@@ -360,16 +431,22 @@ export default class SettingsScene extends Phaser.Scene {
 
   // ---- Controls Tab ----
 
+  // "(fixed)" is the row's own statement that it is read-only, so a Pause row that
+  // refuses to rebind doesn't read as a broken row. See DEFINABLE_ACTIONS.
+  private controlRowLabel(action: ActionName): string {
+    const b = this.settings.get().bindings[action];
+    const suffix = DEFINABLE_ACTIONS.has(action) ? '' : '  (fixed)';
+    return `${ACTION_LABELS[action]}: [${getKeyName(b.keyboard)}] [${getButtonName(b.gamepadButton)}]${suffix}`;
+  }
+
   private buildControlsTab(): void {
-    const cfg = this.settings.get();
     const actions = Object.keys(ACTION_LABELS) as ActionName[];
     const style = { fontSize: '12px', color: '#cccccc', fontFamily: 'monospace' };
 
-    this.controlItems = actions.map((action, i) => {
-      const binding = cfg.bindings[action];
-      const label = `${ACTION_LABELS[action]}: [${getKeyName(binding.keyboard)}] [${getButtonName(binding.gamepadButton)}]`;
-      return this.makeRow(this.controlsContainer, 320, 90 + i * 28, label, style, () => this.selectAndActivate(i));
-    });
+    this.controlItems = actions.map((action, i) =>
+      this.makeRow(this.controlsContainer, 320, 90 + i * 28, this.controlRowLabel(action), style,
+        () => this.selectAndActivate(i))
+    );
 
     // Add reset option
     const resetIndex = actions.length;
@@ -381,13 +458,9 @@ export default class SettingsScene extends Phaser.Scene {
   }
 
   private refreshControlsTab(): void {
-    const cfg = this.settings.get();
     const actions = Object.keys(ACTION_LABELS) as ActionName[];
     actions.forEach((action, i) => {
-      const binding = cfg.bindings[action];
-      this.controlItems[i]?.setText(
-        `${ACTION_LABELS[action]}: [${getKeyName(binding.keyboard)}] [${getButtonName(binding.gamepadButton)}]`
-      );
+      this.controlItems[i]?.setText(this.controlRowLabel(action));
     });
   }
 
@@ -467,9 +540,13 @@ export default class SettingsScene extends Phaser.Scene {
     if (this.activeTab === 3) this.refreshGamepadTab();
 
     // Highlight selected row
+    const actions = Object.keys(ACTION_LABELS) as ActionName[];
     const items = this.getActiveItems();
     items.forEach((t, i) => {
-      t.setColor(i === this.selectedRow ? '#ffff00' : '#cccccc');
+      if (i === this.selectedRow) { t.setColor('#ffff00'); return; }
+      // Dim the read-only control rows (Pause) so "(fixed)" is backed up visually.
+      const fixed = this.activeTab === 2 && i < actions.length && !DEFINABLE_ACTIONS.has(actions[i]);
+      t.setColor(fixed ? '#8a8a8a' : '#cccccc');
     });
 
     this.captureStatusText.setText('');
@@ -613,6 +690,46 @@ export default class SettingsScene extends Phaser.Scene {
 
   // ---- Key rebinding ----
 
+  /**
+   * Heal a `keyboard: null` binding left behind by an earlier build.
+   *
+   * DEL used to unbind a control here (see startKeyCapture) and that unbind was
+   * persisted: Settings.merge() copies `keyboard === null` through verbatim
+   * (src/config/Settings.ts:278) and sanitise() does not touch bindings
+   * (src/config/Settings.ts:291-299). The affordance is gone, so nothing can
+   * produce a null any more — but a stored one would be a control that can never
+   * be pressed and, on Pause, one that can no longer be redefined either.
+   * Restoring the default is the only honest way out of a state the UI can no
+   * longer reach.
+   */
+  private repairUnboundKeys(): void {
+    const cfg = this.settings.get();
+    let repaired = false;
+    for (const action of Object.keys(ACTION_LABELS) as ActionName[]) {
+      if (cfg.bindings[action].keyboard === null) {
+        cfg.bindings[action].keyboard = DEFAULT_SETTINGS.bindings[action].keyboard;
+        repaired = true;
+      }
+      // A non-definable control has no row the player can edit, so ANY stored
+      // value other than the default is unreachable — not just null. An earlier
+      // build let Pause be moved off ESC; that leaves a row rendering
+      // "Pause: [K] [Start] (fixed)" with no way back except Reset to Defaults,
+      // which would also wipe the six bindings the player does own.
+      if (!DEFINABLE_ACTIONS.has(action)) {
+        const def = DEFAULT_SETTINGS.bindings[action];
+        if (cfg.bindings[action].keyboard !== def.keyboard
+          || cfg.bindings[action].gamepadButton !== def.gamepadButton) {
+          cfg.bindings[action] = { ...def };
+          repaired = true;
+        }
+      }
+    }
+    if (repaired) {
+      this.settings.save();
+      this.game.events.emit('settings:changed');
+    }
+  }
+
   private startKeyCapture(): void {
     const actions = Object.keys(ACTION_LABELS) as ActionName[];
 
@@ -625,8 +742,7 @@ export default class SettingsScene extends Phaser.Scene {
     // already wiped the "Press a key" prompt — an armed capture with nothing on
     // screen saying so. The next key pressed was swallowed (the handler is on
     // `window` in the capture phase and calls stopPropagation) and written into
-    // moveLeft, silently undoing the reset the user had just performed; DELETE
-    // or BACKSPACE in that window persisted an unbound control instead. ESC,
+    // moveLeft, silently undoing the reset the user had just performed. ESC,
     // [ CLOSE ] and the 5 s backstop all rescued it, but only if you knew the
     // menu was still listening.
     //
@@ -645,19 +761,31 @@ export default class SettingsScene extends Phaser.Scene {
       return;
     }
 
-    this.captureAction = actions[this.selectedRow];
+    const action = actions[this.selectedRow];
+
+    // Pause is not in the original's definable set — see DEFINABLE_ACTIONS. Say so
+    // rather than arming a capture that would refuse the key afterwards.
+    if (!DEFINABLE_ACTIONS.has(action)) {
+      this.captureStatusText.setText(
+        `"${ACTION_LABELS[action]}" is fixed and cannot be redefined`
+      );
+      return;
+    }
+
+    this.captureAction = action;
     this.isCapturing = true;
-    this.captureStatusText.setText(`Press a key for "${ACTION_LABELS[this.captureAction]}" (ESC to cancel, DEL to unbind)`);
+    this.captureStatusText.setText(`Press a key for "${ACTION_LABELS[action]}" (ESC to cancel)`);
 
     // Listen for next key press
     const handler = (event: KeyboardEvent) => {
       event.preventDefault();
       event.stopPropagation();
+      if (event.repeat) return; // a held-down key is one choice, not a stream
 
       // Never write through a null captureAction: `cfg.bindings[null]` is
       // undefined and assigning to it throws.
-      const action = this.captureAction;
-      if (!action) {
+      const capturing = this.captureAction;
+      if (!capturing) {
         this.cancelCapture();
         return;
       }
@@ -667,45 +795,74 @@ export default class SettingsScene extends Phaser.Scene {
         return;
       }
 
+      // Duplicate rejection, straight out of the original — but only against
+      // controls already rebound on this visit (`redefinedThisVisit`), which is
+      // what the original's per-control duplication flag actually tracks.
+      // DEFINE_PLAYER_CONTROL_FROM_KEYPRESS (menu_define_keys.txt:69) refuses a
+      // key held by a control whose flag is set and returns false, so
+      // `key_pressed = true` never happens, the loop does not advance (:71-85)
+      // and the same control is prompted for again: reject and re-prompt, not
+      // swap. Controls the player has not reached yet still have the flag clear
+      // from :54, so their bindings do NOT block — which is what makes swapping
+      // two keys possible, and transient duplicates are expected mid-pass.
+      //
+      // DEL/BACKSPACE used to unbind at this point. Nothing in the original
+      // supports an unbound control: define_default_controls.txt:1-22 binds all
+      // seven of player 1's unconditionally, the redefine loop only advances on a
+      // real keypress, and draw_control (menu_define_keys.txt:136-178) has no
+      // unset branch — it can only render a keyboard, joypad, mouse or stick
+      // binding. It was a port invention whose only measured effect was letting
+      // the player unbind Pause and lock themselves out of this menu, so it is
+      // gone; DEL and BACKSPACE now bind like any other key.
       const cfg = this.settings.get();
-      // Unbinding is a real feature, not an accident of the capture loop: the
-      // prompt above advertises it, getKeyName(null) renders the row as "[---]",
-      // InputManager.buildKeys() skips a null keyboard binding rather than
-      // calling addKey(null) (src/systems/InputManager.ts:193-198), and it
-      // survives a reload — Settings.merge() copies `keyboard === null` through
-      // verbatim and sanitise() does not touch bindings at all
-      // (src/config/Settings.ts:278, 291-299). Nothing downstream treats null as
-      // "use the default", so persisting it is consistent end to end.
-      const unbind = event.keyCode === Phaser.Input.Keyboard.KeyCodes.DELETE ||
-                     event.keyCode === Phaser.Input.Keyboard.KeyCodes.BACKSPACE;
-      cfg.bindings[action].keyboard = unbind ? null : event.keyCode;
+      const clash = [...this.redefinedThisVisit].find(
+        a => a !== capturing && cfg.bindings[a].keyboard === event.keyCode
+      );
+      if (clash) {
+        this.captureStatusText.setText(
+          `${getKeyName(event.keyCode)} is already "${ACTION_LABELS[clash]}" - press another (ESC to cancel)`
+        );
+        this.armCaptureBackstop(); // still armed on the same action; give them 5s more
+        return;
+      }
+
+      cfg.bindings[capturing].keyboard = event.keyCode;
+      this.redefinedThisVisit.add(capturing); // menu_define_keys.txt:74
       this.settings.save();
       this.game.events.emit('settings:changed');
       this.endCapture();
-      // ...but say so. endCapture() -> refreshUI() has just blanked the status
-      // line, so an unbind used to land with no acknowledgement whatsoever: the
-      // only trace was a row quietly changing to "---", which is also what an
-      // unset gamepad button looks like. Name the action and name the way back,
-      // so an accidental DEL is obviously recoverable without a page reload.
-      if (unbind) {
-        this.captureStatusText.setText(
-          `"${ACTION_LABELS[action]}" unbound - ENTER on the row to rebind`
-        );
-      }
     };
 
-    // Use raw DOM event to capture any key including ones Phaser might swallow
+    // Use raw DOM event to capture any key including ones Phaser might swallow.
+    // Deliberately not `once`: a rejected duplicate keeps the capture armed, so
+    // the listener has to survive it. cancelCapture() is what removes it.
     this.captureKeyHandler = handler;
-    window.addEventListener('keydown', handler, { once: true, capture: true });
+    window.addEventListener('keydown', handler, { capture: true });
 
     const padHandler = (_pad: Phaser.Input.Gamepad.Gamepad, button: Phaser.Input.Gamepad.Button) => {
-      const action = this.captureAction;
-      if (!action) {
+      const capturing = this.captureAction;
+      if (!capturing) {
         this.cancelCapture();
         return;
       }
+      // Same duplication rule as the keyboard above: the original's check is per
+      // control, not per device (menu_define_keys.txt:54,74 bracket the whole
+      // redefine regardless of what draw_control ends up rendering), and the
+      // defaults are duplicate-free on both devices (DefaultSettings.ts:29-35).
       const cfg = this.settings.get();
-      cfg.bindings[action].gamepadButton = button.index;
+      const clash = [...this.redefinedThisVisit].find(
+        a => a !== capturing && cfg.bindings[a].gamepadButton === button.index
+      );
+      if (clash) {
+        this.captureStatusText.setText(
+          `${getButtonName(button.index)} is already "${ACTION_LABELS[clash]}" - press another (ESC to cancel)`
+        );
+        this.input.gamepad?.once('down', padHandler); // `once` fired; re-arm it
+        this.armCaptureBackstop();
+        return;
+      }
+      cfg.bindings[capturing].gamepadButton = button.index;
+      this.redefinedThisVisit.add(capturing); // menu_define_keys.txt:74
       this.settings.save();
       this.game.events.emit('settings:changed');
       this.endCapture();
@@ -713,12 +870,18 @@ export default class SettingsScene extends Phaser.Scene {
     this.capturePadHandler = padHandler;
     this.input.gamepad?.once('down', padHandler);
 
-    // Timeout — cancel after 5 seconds. Unconditional: on a touch device there
-    // may be no keyboard *or* gamepad to end the capture with, and without this
-    // the menu would be stuck refusing to navigate. It is a *backstop*, not the
-    // disarm: the Clock throws pending timers away on shutdown without firing
-    // them (node_modules/phaser/src/time/Clock.js:436), so cancelCapture() is
-    // what actually guarantees the listeners go.
+    this.armCaptureBackstop();
+  }
+
+  // Timeout — cancel after 5 seconds. Unconditional: on a touch device there
+  // may be no keyboard *or* gamepad to end the capture with, and without this
+  // the menu would be stuck refusing to navigate. It is a *backstop*, not the
+  // disarm: the Clock throws pending timers away on shutdown without firing
+  // them (node_modules/phaser/src/time/Clock.js:436), so cancelCapture() is
+  // what actually guarantees the listeners go. Restarted on every rejected
+  // duplicate, so a re-prompt is not counting down someone else's five seconds.
+  private armCaptureBackstop(): void {
+    if (this.captureTimer) this.time.removeEvent(this.captureTimer);
     this.captureTimer = this.time.delayedCall(5000, () => {
       this.captureTimer = null;
       if (this.isCapturing) this.endCapture();

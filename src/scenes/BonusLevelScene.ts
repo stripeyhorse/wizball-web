@@ -155,6 +155,11 @@ const NORMAL_FIRE_RATE = 20;         // frames — C++ wizball.txt:511
 const DOUBLE_FIRE_RATE = 10;         // frames — C++ wizball.txt:512
 const SHIELD_STARTING_ENERGY = 2100; // frames — C++ constant.txt:217
 const SHIELD_HIT_PENALTY = 420;      // frames — C++ constant.txt:218
+// C++ constant.txt:219 SHIELD_DEPLETION_WARNING_THRESHOLD — "how long before the
+// shield expires you get a warning (it starts to flash)". Both bubble layers test
+// it identically (wizball_shield_bubble_layer.txt:99-100,
+// catellite_shield_swirl_layer.txt:83-84).
+const SHIELD_DEPLETION_WARNING_THRESHOLD = 120;
 const CATELLITE_FOLLOW_SPEED = 4;    // px/frame — C++ CATELLITE_FOLLOWING_HORIZONTAL_SPEED
 const CATELLITE_LAG_DISTANCE = 64;   // px behind the ball
 
@@ -163,12 +168,22 @@ const MAX_LIVES = 9; // C++ function_gain_life.txt (temp_1 + 1 !> 9)
 // Shield remainders arrive in the scene payload, i.e. from code this scene does
 // not own, so treat them as untrusted. Every C++ write to a *_shield_stored_health
 // global is either the SHIELD_STARTING_ENERGY constant or a `!< 0` decrement
-// (wizball.txt:914, :920, :1067-1098, :1122-1132), so [0, SHIELD_STARTING_ENERGY]
-// is the invariant to hold. The old init did a bare Math.min, which is one-sided:
-// a negative — or a NaN, which loses every comparison — survived it with the
-// INVULNERABILITY bitflag still set, i.e. a shield that never expires.
+// (wizball.txt:914, :920, :1067, :1076, :1079, :1086, :1095, :1098, :1122-1124,
+// :1130-1132), so [0, SHIELD_STARTING_ENERGY] is the invariant to hold. The old
+// init did a bare Math.min, which is one-sided: a negative — or a NaN, which loses
+// every comparison — survived it with the INVULNERABILITY bitflag still set, i.e. a
+// shield that never expires.
+//
+// The C++ globals are INTEGER counters decremented by exactly 1 a frame
+// (wizball.txt:1123 `let temp_1 = temp_1 - 1 !< 0`), so the range is not the whole
+// invariant — integrality is too. A fractional remainder (3.5, say) walks straight
+// past every `=== 0` test forever: 3.5 -> 2.5 -> ... -> -0.5, counter negative and
+// bitflag still set, which is precisely the "flag with nothing behind it" state this
+// helper exists to make unrepresentable. Math.trunc pins it to the C++'s integers.
 const clampShieldEnergy = (v: number | undefined): number =>
-  Number.isFinite(v) ? Math.min(Math.max(v as number, 0), SHIELD_STARTING_ENERGY) : 0;
+  Number.isFinite(v)
+    ? Math.trunc(Math.min(Math.max(v as number, 0), SHIELD_STARTING_ENERGY))
+    : 0;
 
 const FRAME_MS = 1000 / 60; // C++ waits are in 60Hz frames
 const MAX_FRAME_STEPS = 4;  // never simulate more than this per rendered frame
@@ -249,6 +264,20 @@ export default class BonusLevelScene extends Phaser.Scene {
   // in the C++ (LEVEL_COMPLETION_ARRAY_ID, main_game_controller.txt:1075) and has
   // to survive the level -> bonus -> lab -> level round trip rather than being
   // re-derived at the other end.
+  // Pure pass-through, like the level window below: this scene never reads it,
+  // but GameScene needs the score the player was SHOWN before the lab in order to
+  // seed lastScoreSector, or every 100k extra-life boundary crossed by the lab's
+  // own awards is swallowed. C++ player_display_score is a global that survives
+  // the lab (start_game.txt:5) and rolls on re-entry
+  // (manage_score_and_enemy_display.txt:30-56).
+  // Depletion-warning blink phase, advanced once per rendered frame — see drawShield().
+  private shieldWarnPhase: boolean = false;
+  private readonly reduceMotion: boolean =
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      : false;
+
+  private displayScore: number | undefined = undefined;
   private levelCompletion: number[] | undefined = undefined;
   private minOpenLevel: number | undefined = undefined;
   private maxOpenLevel: number | undefined = undefined;
@@ -311,6 +340,7 @@ export default class BonusLevelScene extends Phaser.Scene {
     cauldronFill?: number[];
     shieldEnergy?: number;
     catShieldEnergy?: number;
+    displayScore?: number;
     levelCompletion?: number[];
     minOpenLevel?: number;
     maxOpenLevel?: number;
@@ -322,6 +352,7 @@ export default class BonusLevelScene extends Phaser.Scene {
     this.lives = data.lives ?? 2;
     this.levelProgress = data.levelProgress ?? 0;
     this.cauldronFill = data.cauldronFill ?? [0, 0, 0, 0];
+    this.displayScore = data.displayScore;
     this.levelCompletion = data.levelCompletion;
     this.minOpenLevel = data.minOpenLevel;
     this.maxOpenLevel = data.maxOpenLevel;
@@ -335,27 +366,36 @@ export default class BonusLevelScene extends Phaser.Scene {
     // (Every C++ write to wizball_shield_stored_health is either the constant or a
     // decrement — :914, :1067, :1086, :1124 — so it can never exceed the starting
     // value; the clamp just holds that invariant against a stale payload.)
-    this.shieldEnergy = (this.weaponCollection & WeaponFlag.INVULNERABILITY)
-      ? clampShieldEnergy(data.shieldEnergy)
-      : 0;
-    // Keep the bitflag and the counter consistent the way update_shield_counter
-    // does (wizball.txt:1126-1128): no stored health means no shield. This also
-    // covers the case where the caller has not sent shieldEnergy at all — an
-    // unknown remainder must not become a free 2100-frame immunity to the
-    // enemy-contact fail state below.
-    if (this.shieldEnergy === 0) this.weaponCollection &= ~WeaponFlag.INVULNERABILITY;
+    // setBallShield/setCatShield also keep the bitflag and the counter consistent
+    // the way update_shield_counter does (wizball.txt:1126-1128): no stored health
+    // means no shield. That covers the case where the caller has not sent
+    // shieldEnergy at all — an unknown remainder must not become a free 2100-frame
+    // immunity to the enemy-contact fail state below.
+    this.setBallShield(
+      (this.weaponCollection & WeaponFlag.INVULNERABILITY) ? data.shieldEnergy : 0);
 
-    // The catellite's bubble is carried over the same way: pre_equip_wizball's
-    // bonus-level branch (wizball.txt:926-937) re-spawns catellite_shield_swirl_layer
-    // over the SURVIVING cat_shield_stored_health whenever CATELLITE_INVULNERABILITY
-    // is in the loadout, and update_shield_counter (:1130-1136) keeps burning that
-    // counter down alongside the ball's. Only the wizball's remainder used to be
-    // threaded in here, so a cat arrived with the 1024 bitflag set and nothing
-    // behind it — a shield the scene claimed but could not spend or expire.
-    this.catShieldEnergy = (this.weaponCollection & WeaponFlag.CATELLITE_INVULNERABILITY)
-      ? clampShieldEnergy(data.catShieldEnergy)
-      : 0;
-    if (this.catShieldEnergy === 0) this.weaponCollection &= ~WeaponFlag.CATELLITE_INVULNERABILITY;
+    // The catellite's bubble is carried over the same way — but behind ALL THREE of
+    // the C++'s nested gates, not just its own bitflag:
+    //
+    //   :908  if weapon_collection & INVULNERABILITY_BITFLAG       <- the BALL's flag
+    //   :931    IF weapon_collection & CATELLITE_BITFLAG           <- a cat exists
+    //   :934      if weapon_collection & CATELLITE_INVULNERABILITY <- the cat's flag
+    //   :935        spawn_entity (catellite_shield_swirl_layer)
+    //
+    // The whole shield-respawn block lives inside :908, so when the ball's shield has
+    // burnt out the cat gets NO swirl layer either, however much cat_shield_stored_health
+    // is left. That is the common exit state — the ball's counter drains faster because
+    // it is the bigger target — and reading :926-937 without its two enclosing gates
+    // handed the cat a live bubble on entry: a free asteroid kill and 420 frames spent
+    // (onCatelliteHitEnemy) against an entity the original never spawns.
+    //
+    // :931 matters too: no CATELLITE_BITFLAG means createCatellite() returns early, so a
+    // cat shield here would be a counter with no cat to hang it on.
+    const catShieldSpawns =
+      (this.weaponCollection & WeaponFlag.INVULNERABILITY) &&
+      (this.weaponCollection & WeaponFlag.CATELLITE) &&
+      (this.weaponCollection & WeaponFlag.CATELLITE_INVULNERABILITY);
+    this.setCatShield(catShieldSpawns ? data.catShieldEnergy : 0);
 
     // reset per-run gameplay state
     this.enemiesKilled = 0;
@@ -524,7 +564,7 @@ export default class BonusLevelScene extends Phaser.Scene {
     // setCircle's offset used to be (4,4) — the value that centres a radius-12
     // circle in a 32px frame, not in this sprite's 48px one — so the hitbox sat
     // 5.3px up and left of the ball actually drawn. Centre it the way GameScene
-    // does (GameScene.ts:1472).
+    // does (GameScene.createPlayer, the setCircle on COLLISION_RADIUS).
     const ballBodyOffset = (BALL_FRAME - BALL_BODY_RADIUS * 2) / 2;
     body.setCircle(BALL_BODY_RADIUS, ballBodyOffset, ballBodyOffset);
     body.setCollideWorldBounds(true);
@@ -675,9 +715,10 @@ export default class BonusLevelScene extends Phaser.Scene {
     if (this.catShieldEnergy > 0) {
       if (!this.catShieldHitThisFrame) {
         this.catShieldHitThisFrame = true;
-        this.catShieldEnergy = Math.max(0, this.catShieldEnergy - SHIELD_HIT_PENALTY);
+        // catellite_shield_swirl_layer.txt:115-117 — `temp_1 - SHIELD_HIT_PENALTY !< 0`,
+        // then the counter and its bitflag are re-synced by :91-99 on the next frame.
+        this.setCatShield(this.catShieldEnergy - SHIELD_HIT_PENALTY);
         this.playSfx('wizball_or_catellite_shield_impact', 0.4);
-        if (this.catShieldEnergy === 0) this.weaponCollection &= ~WeaponFlag.CATELLITE_INVULNERABILITY;
       }
       this.killBonusEnemy(enemy, st, st.type !== WaveType.RANDOM_ASTEROIDS);
       return;
@@ -705,9 +746,9 @@ export default class BonusLevelScene extends Phaser.Scene {
     if (this.shieldEnergy > 0) {
       if (!this.shieldHitThisFrame) {
         this.shieldHitThisFrame = true;
-        this.shieldEnergy = Math.max(0, this.shieldEnergy - SHIELD_HIT_PENALTY);
+        // wizball_shield_bubble_layer.txt:137-139 — `temp_1 - SHIELD_HIT_PENALTY !< 0`.
+        this.setBallShield(this.shieldEnergy - SHIELD_HIT_PENALTY);
         this.playSfx('wizball_or_catellite_shield_impact', 0.4);
-        if (this.shieldEnergy === 0) this.weaponCollection &= ~WeaponFlag.INVULNERABILITY;
       }
       // bonus_wave_enemy.txt:759-765 — a shield-killed asteroid scores nothing
       // and is not added to bonus_level_enemies_killed.
@@ -761,7 +802,22 @@ export default class BonusLevelScene extends Phaser.Scene {
     if (this.catellite) {
       this.tweens.add({ targets: this.catellite, alpha: 0, duration: 320 });
     }
-    this.shieldEnergy = 0;
+    // The bubbles go with the ball — but only as ENTITIES. Nothing in the C++
+    // bonus-level death path (wizball.txt:698-714) touches wizball_shield_stored_health,
+    // cat_shield_stored_health or wizball_current_loadout: it queues
+    // LEVEL_RESET_FLAG_WIZBALL_FINISHED, plays the sound, spawns the particles and
+    // kills the ball. The shield layers are ENT_TYPE_DESTROYED_IN_LEVEL_TRANSITION
+    // (wizball_shield_bubble_layer.txt:11-12, catellite_shield_swirl_layer.txt:9-10) so
+    // they are cleaned up by the transition, and the surviving counters are what the
+    // next pre_equip_wizball (:908-938) re-spawns them from.
+    //
+    // This used to do `this.shieldEnergy = 0` and leave INVULNERABILITY set, which
+    // manufactured exactly the {energy 0, flag set} pair init's guard exists to catch
+    // and forwarded it to the laboratory. Zeroing the counters is not the fix — the
+    // C++ keeps them — so the write is simply gone. `finished` already stops
+    // stepShieldCounter, drawShield and both shield collision branches, which is the
+    // dead ball's half of it. Every remaining write to either counter goes through
+    // setBallShield/setCatShield, so the pair can no longer diverge here or anywhere.
     this.shieldGfx.clear();
 
     // LEVEL_RESET_FLAG_WIZBALL_FINISHED (main_game_controller.txt:403-404).
@@ -1393,14 +1449,15 @@ export default class BonusLevelScene extends Phaser.Scene {
     this.finished = true;
 
     // Forward the whole init-data contract with the updated score/lives. The
-    // level window (levelCompletion/minOpenLevel/maxOpenLevel) is pure
-    // pass-through: nothing in this scene reads it, but LaboratoryScene relays it
-    // on to GameScene (LaboratoryScene.ts:32-34, :71-73, :264-266) so it survives
-    // the trip. The two shield remainders do NOT: the lab neither declares nor
-    // relays them yet, so they stop there and the ball/cat arrive back in
-    // GameScene with a fresh 0. They are still sent so that relay only has to be
-    // added at the lab end — do not "fix" that by reconstructing the counters
-    // from the bitflags, which is exactly the guesswork this parity pass removed.
+    // level window (levelCompletion/minOpenLevel/maxOpenLevel), displayScore and
+    // both shield remainders are pure pass-through: nothing in this scene reads
+    // them, but LaboratoryScene declares each field, copies it in init() and puts
+    // it straight back in buildPayload(), so they survive the trip to GameScene.
+    // (Cited by function rather than by line — these citations have already rotted
+    // once as the lab was edited underneath them.) Every field below must be
+    // relayed at BOTH hops: a field that only one of the two scenes knows about is
+    // silently dropped, which is exactly how displayScore came to be sent by
+    // GameScene, consumed by the lab, and never actually arrive.
     this.scene.start('Laboratory', {
       level: this.level,
       score: this.score,
@@ -1411,6 +1468,7 @@ export default class BonusLevelScene extends Phaser.Scene {
       cauldronFill: this.cauldronFill,
       shieldEnergy: this.shieldEnergy,
       catShieldEnergy: this.catShieldEnergy,
+      displayScore: this.displayScore,
       levelCompletion: this.levelCompletion,
       minOpenLevel: this.minOpenLevel,
       maxOpenLevel: this.maxOpenLevel
@@ -1495,43 +1553,106 @@ export default class BonusLevelScene extends Phaser.Scene {
       targetY - this.catellite.y, -CATELLITE_FOLLOW_SPEED, CATELLITE_FOLLOW_SPEED);
   }
 
+  /**
+   * The ONLY writer for the wizball's shield counter, and its twin below is the only
+   * writer for the cat's. C++ update_shield_counter (wizball.txt:1122-1128) reads the
+   * global, floors the decrement with `!< 0`, writes it back and clears the bitflag in
+   * the same breath when it lands on 0 — the counter and the flag are never updated
+   * apart, so nothing in the original can hold INVULNERABILITY with an empty counter
+   * (or an empty counter with the flag gone). Funnelling every assignment through
+   * these two makes that pairing unforgeable here as well: init, both shield-contact
+   * branches and the per-frame decrement all come through, and killPlayer no longer
+   * writes either counter at all.
+   *
+   * The test is `<= 0`, not `=== 0`: clampShieldEnergy already truncates so an exact 0
+   * is reachable, but a `>= 0` floor plus an `=== 0` equality is the pair that let a
+   * fractional counter walk past 0 into negatives with the flag still set. Belt and
+   * braces, and it costs nothing.
+   */
+  private setBallShield(energy: number | undefined): void {
+    this.shieldEnergy = clampShieldEnergy(energy);
+    if (this.shieldEnergy <= 0) this.weaponCollection &= ~WeaponFlag.INVULNERABILITY;
+  }
+
+  /** As setBallShield, for cat_shield_stored_health / CATELLITE_INVULNERABILITY_BITFLAG
+   *  (wizball.txt:1130-1136, catellite_shield_swirl_layer.txt:91-99). */
+  private setCatShield(energy: number | undefined): void {
+    this.catShieldEnergy = clampShieldEnergy(energy);
+    if (this.catShieldEnergy <= 0) this.weaponCollection &= ~WeaponFlag.CATELLITE_INVULNERABILITY;
+  }
+
   private stepShieldCounter(): void {
-    // C++ update_shield_counter (wizball.txt:1118-1138) — the shield burns one
+    // C++ update_shield_counter (wizball.txt:1120-1138) — the shield burns one
     // frame of stored health per frame and drops its bitflag when it runs out.
-    if (this.shieldEnergy > 0) {
-      this.shieldEnergy -= 1;
-      if (this.shieldEnergy === 0) this.weaponCollection &= ~WeaponFlag.INVULNERABILITY;
-    }
+    if (this.shieldEnergy > 0) this.setBallShield(this.shieldEnergy - 1);
 
     // :1130-1136 does the identical thing to cat_shield_stored_health right after,
     // dropping CATELLITE_INVULNERABILITY on its own when that counter empties.
-    if (this.catShieldEnergy > 0) {
-      this.catShieldEnergy -= 1;
-      if (this.catShieldEnergy === 0) this.weaponCollection &= ~WeaponFlag.CATELLITE_INVULNERABILITY;
-    }
+    if (this.catShieldEnergy > 0) this.setCatShield(this.catShieldEnergy - 1);
   }
 
   private drawShield(): void {
     this.shieldGfx.clear();
+    // Flipped once per rendered frame, and shared by both bubbles so they blink in
+    // step the way the C++'s two layers do off the same counter. Held steady under
+    // prefers-reduced-motion: the C++ cue is a ~30Hz on/off strobe, which is both a
+    // photosensitivity risk and exactly what that media query exists to suppress.
+    // The dimmed ring below is still a non-motion indicator that the shield is
+    // going, so honouring the preference does not remove the warning itself.
+    this.shieldWarnPhase = this.reduceMotion ? true : !this.shieldWarnPhase;
     if (this.finished) return;
 
+    // The bubble has to read as the thing that is actually absorbing the hit, so the
+    // drawn ring is sized to the contact distance that spends it, NOT to the C++'s
+    // radius 36 (wizball_shield_bubble_layer.txt:45-46): there the bubble is its own
+    // ENT_TYPE_PLAYER_BULLET entity with a radius-36 circle, which this scene does not
+    // model — the ball's own body is what spends the shield here, so drawing 36 over a
+    // ~20px contact would open a wide penetration gap.
+    //
+    // KNOWN IMPERFECTION, stated honestly because the previous wording had the number
+    // wrong. The ball's effective half-width is 8, not the 12 passed to setCircle:
+    // createPlayer calls setDisplaySize(32,32) on a 48px frame BEFORE setCircle, so
+    // Phaser rescales the body by 32/48 on the first updateBounds. With enemies at
+    // half-width 11-16 that puts real contact at 19-24px, so the ring drawn at 24 sits
+    // at the very top of the range and the smallest enemies touch ~5px inside it — the
+    // same cosmetic gap that was closed on the cat below. It is left at 24 rather than
+    // dropped to ~20 because the two defensible targets disagree (the C++'s 36 vs the
+    // measured contact), and shrinking the ball's shield is a visible art change rather
+    // than a parity fix. Worth a decision, not a silent edit.
     if (this.shieldEnergy > 0 && this.player) {
       this.strokeShieldBubble(this.player.x, this.player.y, this.shieldEnergy, 24, 19);
     }
 
-    // catellite_shield_swirl_layer.txt:75-77 pins the swirl to parent.world_x/y,
-    // so the cat's bubble rides the cat exactly like the ball's rides the ball —
-    // drawn a little tighter because the catellite sprite is 24px, not 32.
+    // catellite_shield_swirl_layer.txt:75-77 pins the swirl to parent.world_x/y, so the
+    // cat's bubble rides the cat exactly like the ball's rides the ball. Radius 24, from
+    // catellite_shield_swirl_layer.txt:52-53 (`LET COLLISION_SHAPE = CIRCLE` /
+    // `LET RADIUS = 24`) — and it agrees with the collision here too: the cat's body is
+    // a 24x24 rect (halfWidth 12) plus the same 11-16px of enemy. It was drawn at 19,
+    // copied off the ball's inner ring rather than off the C++, so enemies visibly
+    // pushed ~5px inside an intact shield before it popped them.
     if (this.catShieldEnergy > 0 && this.catellite) {
-      this.strokeShieldBubble(this.catellite.x, this.catellite.y, this.catShieldEnergy, 19, 15);
+      this.strokeShieldBubble(this.catellite.x, this.catellite.y, this.catShieldEnergy, 24, 19);
     }
   }
 
   private strokeShieldBubble(x: number, y: number, energy: number, outer: number, inner: number): void {
-    // Flicker out over the last second, like the collapsing bubble
-    // (SHIELD_DEPLETION_WARNING_THRESHOLD, wizball_shield_bubble_layer.txt /
-    // catellite_shield_swirl_layer.txt:81-92).
-    const dim = energy < 60 && Math.floor(energy / 4) % 2 === 0;
+    // Both bubble layers run the same depletion warning: below
+    // SHIELD_DEPLETION_WARNING_THRESHOLD they toggle draw_mode on the counter's parity,
+    // i.e. every single frame, not on a 4-frame period
+    // (wizball_shield_bubble_layer.txt:99-105, catellite_shield_swirl_layer.txt:83-89 —
+    // `if temp_1 < SHIELD_DEPLETION_WARNING_THRESHOLD` / `let temp_2 = temp_1 mod 2` /
+    // even => draw_mode_invisible). The threshold was hard-coded at 60 here against the
+    // constant's 120 (constant.txt:219), so the warning started a second late and ran at
+    // a quarter of the rate. The C++ blanks the sprite outright; this dims instead of
+    // dropping the ring, which is the same cue without a full on/off strobe.
+    //
+    // The phase comes from a per-RENDER counter, not from `energy % 2`. The C++ is a
+    // fixed 60Hz with one step per render, so there the counter's parity IS the render
+    // parity; here stepShieldCounter() runs 0-4 times per rendered frame, so on a
+    // throttled tab or a 30Hz display energy changes by 2 between draws, the parity
+    // never alternates and the warning silently disappears entirely — measured as 1
+    // toggle in 60 renders at 30fps, versus 59 at 60fps.
+    const dim = energy < SHIELD_DEPLETION_WARNING_THRESHOLD && this.shieldWarnPhase;
     const alpha = dim ? 0.2 : 0.6;
     this.shieldGfx.lineStyle(2, 0x88ccff, alpha);
     this.shieldGfx.strokeCircle(x, y, outer);

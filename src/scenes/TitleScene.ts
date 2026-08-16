@@ -14,6 +14,8 @@ export default class TitleScene extends Phaser.Scene {
   private started = false;
   private firePrev = false;
   private settingsOpen = false;
+  private settingsWasRunning = false;
+  private settingsLaunchWait = 0;
   private hiScoreSystem!: HiScoreSystem;
 
   constructor() {
@@ -28,6 +30,8 @@ export default class TitleScene extends Phaser.Scene {
     this.started = false;
     this.firePrev = false;
     this.settingsOpen = false;
+    this.settingsWasRunning = false;
+    this.settingsLaunchWait = 0;
     // The previous visit's logos were destroyed with that scene instance; without
     // this, every return to the Title appended four more and update() called
     // setVisible() on destroyed objects.
@@ -75,6 +79,24 @@ export default class TitleScene extends Phaser.Scene {
 
     // Touch / mouse: tap anywhere (off the on-screen buttons) to start.
     this.input.on('pointerdown', this.onPointerDown, this);
+
+    // Settings runs in *parallel* on top of us, so the Title has to switch its
+    // own input off for as long as it is up (see setSuspended). Resume is driven
+    // off the Settings scene's own lifecycle rather than a per-frame
+    // scene.isActive() poll: a Scene's `events` emitter lives on the scene
+    // instance and survives every stop/start, so one SHUTDOWN listener catches
+    // *every* exit path ([ CLOSE ], ESC, or a stop from outside), and it fires
+    // from SceneManager.processQueue — which runs at the very top of
+    // SceneManager.update (node_modules/phaser/src/scene/SceneManager.js:555-557)
+    // — so the Title is already un-suspended before any scene's update() runs
+    // that frame, instead of racing it.
+    const settingsScene = this.scene.get(SETTINGS);
+    if (settingsScene) {
+      settingsScene.events.on(Phaser.Scenes.Events.SHUTDOWN, this.onSettingsShutdown, this);
+      this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+        settingsScene.events.off(Phaser.Scenes.Events.SHUTDOWN, this.onSettingsShutdown, this);
+      });
+    }
 
     if (this.cache.audio.exists('menu_select')) {
       this.sound.add('menu_select');
@@ -131,7 +153,11 @@ export default class TitleScene extends Phaser.Scene {
   }
 
   private startGame(): void {
-    if (this.started) return;
+    // Every route in (SPACE, tap, on-screen FIRE) funnels through here, so this is
+    // the one place the suspension has to hold. See setSuspended: the keyboard
+    // plugin deliberately stays live while Settings is up, so a SPACE pressed over
+    // the overlay still reaches us — it just must not start a game.
+    if (this.settingsOpen || this.started) return;
     this.started = true;
     if (this.cache.audio.exists('menu_select')) {
       this.sound.add('menu_select', { volume: 0.6 }).play();
@@ -148,29 +174,72 @@ export default class TitleScene extends Phaser.Scene {
   }
 
   private openSettings(): void {
-    if (this.scene.isActive(SETTINGS)) return; // already up — don't restart it
+    // already up — don't restart it
+    if (this.settingsOpen || this.scene.isActive(SETTINGS)) return;
+    this.settingsWasRunning = false;
+    this.settingsLaunchWait = 0;
     this.setSuspended(true);
     this.scene.launch(SETTINGS, { returnTo: 'Title' });
     this.scene.bringToTop(SETTINGS);
   }
 
+  private onSettingsShutdown(): void {
+    this.settingsWasRunning = false;
+    this.settingsLaunchWait = 0;
+    if (this.settingsOpen) this.setSuspended(false);
+  }
+
   // Settings is launched in *parallel*, so without this the Title still holds a
   // scene-wide pointerdown->startGame and a captured SPACE: clicking anywhere in
   // the Settings overlay, or pressing SPACE, started a real game underneath it.
-  // Derived from whether Settings is actually running (see update()) so no exit
-  // path can leave the Title with its input switched off.
+  //
+  // The pointer is suspended by switching the input plugin off. The KEYBOARD is
+  // deliberately left running, and the two key actions are gated at the action
+  // instead (openSettings and startGame both return early on settingsOpen). That
+  // asymmetry is the whole fix, so it is worth saying why.
+  //
+  // Turning the keyboard plugin off drops events, it does not defer them:
+  // KeyboardPlugin.update() bails before it touches the queue while inactive
+  // (node_modules/phaser/src/input/keyboard/KeyboardPlugin.js:731-739). Any keyup
+  // that lands while Settings is up is therefore thrown away, and Key.isDown stops
+  // matching the physical key. Every attempt to paper over that desync on the way
+  // back in is a guess about state we destroyed, and both guesses are wrong half
+  // the time:
+  //
+  //   - Guess "everything is up" (keyboard.resetKeys()): correct after a short tap,
+  //     but under a key the user is still HOLDING it clears isDown, and Key.onDown
+  //     only emits 'down' when !isDown (keys/Key.js:276-286) — so the next OS
+  //     auto-repeat arrives as a fresh 'down' edge. Measured: hold S, close with the
+  //     mouse, and Settings re-opens itself; hold SPACE across an ESC-close and the
+  //     game starts on its own.
+  //   - Guess "everything is still down" (do nothing): correct while held, but after
+  //     a short tap it leaves isDown latched true, so the *next* press of S is
+  //     swallowed. Measured: 12 open/ESC-close cycles gave a dead-regular open,
+  //     FAILED, open, FAILED... — 6 failures.
+  //
+  // Keeping the plugin live removes the choice. Keyups keep arriving, Key.isDown
+  // stays true to the hardware, a held key never manufactures a new 'down' edge,
+  // and a released one re-arms normally. No reset needed on either side.
   private setSuspended(suspended: boolean): void {
     this.settingsOpen = suspended;
     this.input.enabled = !suspended;
-    if (this.input.keyboard) this.input.keyboard.enabled = !suspended;
   }
 
   update(): void {
-    const settingsActive = this.scene.isActive(SETTINGS);
-    if (settingsActive !== this.settingsOpen) {
-      this.setSuspended(settingsActive);
-    }
-    if (settingsActive) {
+    if (this.settingsOpen) {
+      // Backstop, so that no failure of the event path above can strand the
+      // Title with its input switched off: resume if Settings has been seen
+      // running and has since gone, or if it never came up at all within two
+      // seconds of the launch. Both arms are gated — the old form derived
+      // suspension from isActive() on every frame with no gate, which is a race
+      // rather than a safety net: scene.launch() only *queues* the start, so on
+      // the frame openSettings() runs, Settings is not active yet and the poll
+      // un-suspended the Title again immediately.
+      if (this.scene.isActive(SETTINGS)) {
+        this.settingsWasRunning = true;
+      } else if (this.settingsWasRunning || ++this.settingsLaunchWait > 120) {
+        this.onSettingsShutdown();
+      }
       // Swallow the overlay's touches so releasing FIRE over Settings doesn't
       // register as an edge the moment it closes.
       this.firePrev = !!(window as unknown as { __wizTouch?: Record<string, boolean> }).__wizTouch?.fire;

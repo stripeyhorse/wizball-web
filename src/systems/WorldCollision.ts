@@ -551,6 +551,29 @@ export default class WorldCollisionMap {
       // Flipping the sign reaches the C++'s converged answer in one step for every
       // input, so all four edges are solid exactly as COLLISION_*_WORLD_EDGE_SOLID
       // intends (wizball.txt:164-165 sets both).
+      //
+      // TOP EDGE - entities are still occasionally seen above y=0. That is MEASURED,
+      // FAITHFUL C++ BEHAVIOUR; do not "fix" it here.
+      // The ceiling is handled by the DIRECTION_DOWN case below (the direction the vertical
+      // push walks when the entity travels UP), which is `-y` in the C++ too
+      // (world_collision.cpp:1159-1163): no sign flip, no int wraparound, converges in one
+      // step. A 20,000-run / 24M-frame sweep over all 8 shipped levels measures escapes of
+      // top=16, bottom=0, left=0, right=0, and EVERY frame is bit-identical to a C++-int32
+      // reference build (original :1141/:1155 signs restored, `|0` walk accumulators). The
+      // escapes come from two other places, both equally faithful:
+      //   1. the horizontal corner slide (12 of 15 sampled cases). Its "did that shove one
+      //      of the other two corners into material" checks use solidTest, mirroring
+      //      WORLDCOLL_collision_test (world_collision.cpp:2482-2491 calling :1303-1315),
+      //      which reports every out-of-bounds pixel as free and never consults the
+      //      world-edge flags. So the C++ also evades a corner a pixel past the ceiling and
+      //      applies the deviation to ENT_Y (world_collision.cpp:2522-2523).
+      //   2. the sticky RESULT_COLLISION_IGNORED escape hatch in resolvePushResult (3 of
+      //      15): a test point already buried in solid material makes the whole push report
+      //      not_collided, so the entity moves its full velocity through the ceiling.
+      // The first crossing is 1-8 px. After it both vertical test points are out of bounds
+      // and so read as IGNORED, leaving the entity free above the world until gravity brings
+      // it back (measured 6-2869 frames out, worst excursion -2604 px, returned in 14 of 15
+      // cases) - all of it reproduced exactly by the reference build.
       switch (direction) {
         case DIRECTION_LEFT:
           return (worldEdgeHit & COLLISION_HORIZONTAL_WORLD_EDGE_SOLID) !== 0
@@ -879,6 +902,13 @@ export default class WorldCollisionMap {
 
       // Moving/evading may have shoved one of the other two corners into solid
       // material; if so, restore the previous position.
+      //
+      // These checks deliberately have NO world-edge awareness: solidTest reports every
+      // out-of-bounds pixel as free, exactly like WORLDCOLL_collision_test
+      // (world_collision.cpp:1303-1315), which is all the C++ calls here
+      // (world_collision.cpp:2482-2491). That is what lets a slide nudge a corner a pixel
+      // past the ceiling, and it is the main source of the measured top-edge escapes - see
+      // the TOP EDGE note in collisionDepth before changing anything here.
       if (this.solidTest(layer, x + firstCheckXOffset, y + firstCheckYOffset, collisionBitmask)) {
         x = oldX;
         y = oldY;
@@ -973,14 +1003,46 @@ export default class WorldCollisionMap {
     };
   }
 
-  // Safety bound for the depth walks below. A legitimate walk is monotonic and leaves the
-  // block it is in on every step, so it can never need more than a couple of passes along
-  // the axis, and an out-of-bounds step now settles on the world edge immediately (see
-  // collisionDepth). The C++ has no bound at all (world_collision.cpp:1334-1364) and relies
-  // on int wraparound to escape its self-referential edge cases; JS numbers do not wrap, so
-  // keep the bound as a backstop against a coordinate running away to +/-Infinity and
-  // hanging the tab. Tripping it returns the walk's current coordinate, which classifies
-  // exactly as the divergent case would have.
+  // Safety bound for the depth walks below. The C++ walks are unbounded
+  // (world_collision.cpp:1340-1343 and :1356-1359) and rely on int wraparound to escape the
+  // self-referential LEFT/UP edge cases; JS numbers do not wrap, so the bound is first of
+  // all a backstop against a coordinate running away to +/-Infinity and hanging the tab.
+  //
+  // But there is also one reachable input on which the walk never terminates AT IN-BOUNDS
+  // COORDINATES - and it does not terminate in the C++ either:
+  //
+  //   a DIRECTION_DOWN walk (what the vertical push uses when the entity travels UP)
+  //   starting in a column that is solid all the way to the bottom of the map marches down
+  //   16 px per solid tile, runs off the bottom edge, and the DIRECTION_DOWN case in
+  //   collisionDepth returns -y (world_collision.cpp:1159-1163), snapping y back to 0. The
+  //   march then repeats: an exact cycle of (heightInPixels / blockSize) + 1 steps, i.e. 27
+  //   on a 416 px world. Verified by running one such walk on Level 4 for 100,000 steps -
+  //   0,16,32,...,416,0,16,... forever. Levels 3/5/7 alone have 13k-27k pixels that start
+  //   such a walk. The C++ source has no bound, so the original would spin on the same
+  //   input, and the bound is a hang guard rather than a gameplay choice.
+  //
+  //   CAVEAT, because the wording here previously overstated the case: what has been shown
+  //   is that the PORT reaches this state, not that the ORIGINAL ever does. The "C++-int32
+  //   reference" used to check it is this same module with the two signs restored, so it
+  //   can only confirm the sign flip was safe — it cannot speak for the real engine's
+  //   reachable states. If the original never gets an entity buried in a bottom-reaching
+  //   solid column (plausible: a shipped game that hard-hangs on reachable input would be
+  //   notorious), these trips are a symptom of an upstream port defect and this bound is
+  //   masking it rather than emulating anything. Worth chasing if entities are ever seen
+  //   embedded in terrain.
+  //
+  // Tripping it returns wherever the cycle happened to be. That is usually harmless — the
+  // full 8-level sweep re-run with the bound shifted across a whole 27-step period
+  // (0..26, plus +54/+100/+1000/+5000) produced bit-identical trajectories, and the
+  // measured trip rate is 10 in a 20,000-run / 24M-frame sweep, all on Level 4. But it is
+  // NOT free in general, and the earlier claim that "the bound's exact value cannot change
+  // the game" is false: that sweep only ever drove entities under gravity and bounce, never
+  // into the embedded-in-terrain states these walks come from. A counterexample on a shipped
+  // level — Level 3, 16x16 entity at (264,136), yVelocity -4 — returns {depth:-4,
+  // collided:false} at bound 613 and moves the full velocity UP through solid material,
+  // versus {depth:0, collided:true} and a dead stop at bound 614. So changing the bound
+  // formula, or the map dimensions that feed it, can silently alter physics. Treat the
+  // value as load-bearing.
   private get maxDepthWalkSteps(): number {
     return ((this.width + this.height) * 2) + 16;
   }
