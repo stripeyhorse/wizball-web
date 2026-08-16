@@ -141,11 +141,15 @@ export default class SettingsScene extends Phaser.Scene {
       }).setOrigin(0.5).setDepth(1);
       t.setPadding(10, 8, 10, 8);
       t.setInteractive({ useHandCursor: true });
-      // Ignored mid-rebind: refreshUI() would wipe the "Press a key" prompt
-      // while the capture is still armed. [ CLOSE ] is not gated the same way —
-      // it cancels the capture instead, so touch users are never trapped.
+      // Disarms an in-flight rebind rather than ignoring the tap — the scene-wide
+      // rule documented on startKeyCapture(). This used to `return` while
+      // isCapturing, on the grounds that refreshUI() would wipe the "Press a key"
+      // prompt out from under an armed capture; cancelling first makes that wipe
+      // correct instead of dangerous, and a tab header that visibly does nothing
+      // reads as a broken button on touch. [ CLOSE ] has always cancelled rather
+      // than ignored, so this is now consistent with it.
       t.on('pointerdown', () => {
-        if (this.isCapturing) return;
+        this.cancelCapture();
         this.activeTab = i; this.selectedRow = 0; this.refreshUI();
       });
       return t;
@@ -612,6 +616,26 @@ export default class SettingsScene extends Phaser.Scene {
   private startKeyCapture(): void {
     const actions = Object.keys(ACTION_LABELS) as ActionName[];
 
+    // Disarm BEFORE any branch below can return.
+    //
+    // This used to sit *after* the "Reset to Defaults" early-return, so only the
+    // rebind path retired a live capture. Tapping "Move Left" and then tapping
+    // "[ Reset to Defaults ]" left the window keydown listener and the pad
+    // listener armed on moveLeft while selectAndActivate()'s refreshUI() had
+    // already wiped the "Press a key" prompt — an armed capture with nothing on
+    // screen saying so. The next key pressed was swallowed (the handler is on
+    // `window` in the capture phase and calls stopPropagation) and written into
+    // moveLeft, silently undoing the reset the user had just performed; DELETE
+    // or BACKSPACE in that window persisted an unbound control instead. ESC,
+    // [ CLOSE ] and the 5 s backstop all rescued it, but only if you knew the
+    // menu was still listening.
+    //
+    // The rule for the whole scene is therefore: any pointer interaction disarms
+    // an in-flight capture first. Row taps re-arm below on the row just tapped
+    // (which also stops a second tap orphaning the first pair of listeners); the
+    // tab headers, [ CLOSE ] and this reset branch leave it disarmed.
+    this.cancelCapture();
+
     // Last item is "Reset to Defaults"
     if (this.selectedRow >= actions.length) {
       this.settings.update({ bindings: structuredClone(DEFAULT_SETTINGS.bindings) });
@@ -620,10 +644,6 @@ export default class SettingsScene extends Phaser.Scene {
       this.refreshUI();
       return;
     }
-
-    // Tapping a second row mid-capture would arm another pair of listeners and
-    // orphan the first pair, so retire anything still armed before re-arming.
-    this.cancelCapture();
 
     this.captureAction = actions[this.selectedRow];
     this.isCapturing = true;
@@ -648,17 +668,30 @@ export default class SettingsScene extends Phaser.Scene {
       }
 
       const cfg = this.settings.get();
-      if (event.keyCode === Phaser.Input.Keyboard.KeyCodes.DELETE ||
-          event.keyCode === Phaser.Input.Keyboard.KeyCodes.BACKSPACE) {
-        // Unbind keyboard
-        cfg.bindings[action].keyboard = null;
-      } else {
-        // Set the new binding
-        cfg.bindings[action].keyboard = event.keyCode;
-      }
+      // Unbinding is a real feature, not an accident of the capture loop: the
+      // prompt above advertises it, getKeyName(null) renders the row as "[---]",
+      // InputManager.buildKeys() skips a null keyboard binding rather than
+      // calling addKey(null) (src/systems/InputManager.ts:193-198), and it
+      // survives a reload — Settings.merge() copies `keyboard === null` through
+      // verbatim and sanitise() does not touch bindings at all
+      // (src/config/Settings.ts:278, 291-299). Nothing downstream treats null as
+      // "use the default", so persisting it is consistent end to end.
+      const unbind = event.keyCode === Phaser.Input.Keyboard.KeyCodes.DELETE ||
+                     event.keyCode === Phaser.Input.Keyboard.KeyCodes.BACKSPACE;
+      cfg.bindings[action].keyboard = unbind ? null : event.keyCode;
       this.settings.save();
       this.game.events.emit('settings:changed');
       this.endCapture();
+      // ...but say so. endCapture() -> refreshUI() has just blanked the status
+      // line, so an unbind used to land with no acknowledgement whatsoever: the
+      // only trace was a row quietly changing to "---", which is also what an
+      // unset gamepad button looks like. Name the action and name the way back,
+      // so an accidental DEL is obviously recoverable without a page reload.
+      if (unbind) {
+        this.captureStatusText.setText(
+          `"${ACTION_LABELS[action]}" unbound - ENTER on the row to rebind`
+        );
+      }
     };
 
     // Use raw DOM event to capture any key including ones Phaser might swallow

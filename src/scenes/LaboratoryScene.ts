@@ -249,8 +249,21 @@ export default class LaboratoryScene extends Phaser.Scene {
     this.time.delayedCall(900, () => this.nextLevel());
   }
 
-  private nextLevel(): void {
-    const shared = {
+  // The carried-forward half of the outbound payload, READ AT THE MOMENT OF THE
+  // HANDOFF rather than snapshotted earlier. This used to be a `const shared = {...}`
+  // built at the top of nextLevel(), i.e. BEFORE the +7490 fly-through bonus was
+  // added a dozen lines further down (C++ flythru.txt:35), and the two spreads below
+  // then shipped the pre-bonus score: every completed level silently binned its
+  // fly-through award (7490 x 7 = 52,430 points over an eight-level run). Only the
+  // level-8 -> GameComplete branch was correct, because it reads this.score directly,
+  // which is why the loss never showed up on a spot check. Building the object inside
+  // a method makes the ordering bug unrepresentable — there is no window between the
+  // read and the spread in which a field can still change.
+  private buildPayload(): {
+    score: number; weaponCollection: number; startingLoadout: number; lives: number;
+    levelCompletion?: number[]; minOpenLevel?: number; maxOpenLevel?: number;
+  } {
+    return {
       score: this.score,
       weaponCollection: this.weaponCollection,
       // C++ :170 set_global_flag (wizball_starting_loadout, ...). Forwarded even
@@ -265,11 +278,14 @@ export default class LaboratoryScene extends Phaser.Scene {
       minOpenLevel: this.minOpenLevel,
       maxOpenLevel: this.maxOpenLevel
     };
+  }
 
+  private nextLevel(): void {
     if (this.levelProgress >= 3) {
       // Level fully done (all 3 colour stages). C++ flythru.txt:35 awards +7490
       // for the fly-through to the next level, clamped on the same line. Advance,
-      // or finish the game.
+      // or finish the game. Note the score mutation happens BEFORE either handoff
+      // below — hence buildPayload() being called at the scene.start, not up here.
       this.score = Math.min(MAXIMUM_POSSIBLE_SCORE, this.score + 7490);
       if (this.level >= 8) {
         this.scene.start('GameComplete', { score: this.score, level: this.level });
@@ -277,10 +293,10 @@ export default class LaboratoryScene extends Phaser.Scene {
       }
       // C++ CAULDRON_FULLNESS_ARRAY persists across the whole game (only drained
       // per completed stage), so any surplus paint carries to the next level.
-      this.scene.start(GAME, { ...shared, level: this.level + 1, levelProgress: 0, cauldronFill: this.cauldronFill });
+      this.scene.start(GAME, { ...this.buildPayload(), level: this.level + 1, levelProgress: 0, cauldronFill: this.cauldronFill });
     } else {
       // More colour stages remain — return to the SAME level, resuming progress.
-      this.scene.start(GAME, { ...shared, level: this.level, levelProgress: this.levelProgress, cauldronFill: this.cauldronFill });
+      this.scene.start(GAME, { ...this.buildPayload(), level: this.level, levelProgress: this.levelProgress, cauldronFill: this.cauldronFill });
     }
   }
 

@@ -326,6 +326,13 @@ export default class EnemySystem {
       molecule.setDisplaySize(48, 48);
       molecule.setDepth(Depth.ENEMY);
 
+      // Same PhysicsGroup.defaults hazard as spawnEnemyFromWave — add() replays
+      // setAllowGravity(true)/setCollideWorldBounds(false) over anything set
+      // first, so join the group before configuring the body. The
+      // collideWorldBounds value happens to match the default, but allowGravity
+      // does not: these were coming out gravity-enabled.
+      this.enemyGroup.add(molecule);
+
       const body = molecule.body as Phaser.Physics.Arcade.Body;
       body.setSize(32, 32);
       body.setCircle(16, 8, 8);
@@ -334,8 +341,6 @@ export default class EnemySystem {
       body.moves = false;
 
       (molecule as any)._isMolecule = true;
-
-      this.enemyGroup.add(molecule);
       this.enemies.push(molecule);
     });
   }
@@ -780,6 +785,24 @@ export default class EnemySystem {
     enemy.setAlpha(1);
     enemy.setVisible(true);
 
+    // Join the group BEFORE touching the body. A Phaser PhysicsGroup keeps a
+    // `defaults` map (node_modules/phaser/src/physics/arcade/PhysicsGroup.js:165-192)
+    // and its createCallbackHandler (:217-229) replays EVERY entry of it onto the
+    // body on each add():
+    //     for (var key in this.defaults) { body[key](this.defaults[key]); }
+    // Those defaults include setCollideWorldBounds(false), setBounceX/Y(0),
+    // setAllowGravity(true) and setVelocityX/Y(0). Adding after configuration —
+    // which is what this used to do, the add() sat down at the bottom next to the
+    // this.enemies.push() — therefore silently threw away the collideWorldBounds,
+    // bounce and per-type allowGravity settings below: measured 0 of 235 enemies
+    // across levels 1-4 ended up with collideWorldBounds set, all of them had
+    // bounce 0,0. That is why roof gravity-bouncers flew clean out of the world
+    // (y = -218,101) instead of bouncing off the ceiling — and since
+    // updateLifecycle()'s off-screen test is horizontal only they never got
+    // culled either, so they pinned getActiveEnemyCount() above zero and
+    // suppressed replacement waves for the rest of the level.
+    this.enemyGroup.add(enemy);
+
     const body = enemy.body as Phaser.Physics.Arcade.Body;
     body.setSize(32, 32);
     body.setCircle(16, 8.5);
@@ -897,7 +920,7 @@ export default class EnemySystem {
 
     (enemy as any)._data = data;
 
-    this.enemyGroup.add(enemy);
+    // (enemyGroup.add() happens up at sprite-creation time — see the note there.)
     this.enemies.push(enemy);
 
     // C++ :302-310 — everything below the fuzz starts hidden, non-colliding and
@@ -1371,6 +1394,28 @@ export default class EnemySystem {
   // yields a "t" that is sqrt(256) = 16x too small. There is no minimum-speed
   // clamp in the C++ either — a bouncer that lands back on its own start height
   // is meant to come off with nothing.
+  //
+  // "s" is SIGNED in the C++ and that sign carries meaning; this used to take
+  // Math.abs() of it, which is wrong. :959-960 is `temp_2 = y - BOTTOM_START_Y`
+  // and :977-978 is `temp_2 = TOP_START_Y - y` — in both cases s is the distance
+  // the bouncer FELL AWAY FROM its start line towards the surface it just hit, so
+  // s > 0 on any normal bounce. If the contact happens on the far side of the
+  // start line (a floor bouncer resting ABOVE its own start height, e.g. sat on a
+  // tile) s goes negative, the C++ then divides by the signed y_acc and feeds the
+  // result to `sqr`/`sqr -` as a NEGATIVE number, and an integer square root of a
+  // negative yields no launch at all. Math.abs() instead handed it real climb
+  // energy out of |s|: measured at an s = -48 px contact, Math.abs() launched the
+  // bouncer at -265.2 px/s and it rose 50.4 px off the surface, where the signed
+  // form launches at 0 and it rises 0.4 px. Clamping s <= 0 to t = 0 is the
+  // faithful port. Ordinary s > 0 bounces are untouched by the change (same
+  // contact, launch -388.08 px/s before vs -388.84 after — pure 60Hz jitter).
+  //
+  // The C++ finishes with `y_vel = y_vel * temp_1` where `temp_1 = sgn y_vel`
+  // sampled at :955/:973 — i.e. AFTER .world_interaction_routine's caller has
+  // already reflected the velocity off the surface ("the direction we'll be
+  // moving off in"). That is always up for a floor bounce and always down for a
+  // roof bounce, which is exactly the hard-coded sign on data.yVelFixed below, so
+  // there is nothing extra to port there.
   private bounceVerticallyBySetPower(
     enemy: Phaser.Physics.Arcade.Sprite,
     data: EnemyData,
@@ -1383,16 +1428,28 @@ export default class EnemySystem {
     if (data.waveConfig.verticalPlacement === VERTICAL_BOUNCE_FLOOR) {
       if (!body.blocked.down) return;
 
-      // :956-961 — s = (y - (BOTTOM_START_Y << bitshift)) * 2
-      const s = Math.abs(enemy.y - data.startingWorldY) * PRIVATE_SCALE * 2;
-      const t = Math.sqrt(s / gravity);
+      // :956-961 — s = (y - (BOTTOM_START_Y << bitshift)) * 2, signed.
+      // body.center.y, not enemy.y: Systems.step (node_modules/phaser/src/scene/
+      // Systems.js:356-367) emits UPDATE — where the Arcade world runs its whole
+      // step — BEFORE calling Scene.update, and only emits POST_UPDATE, where
+      // Body.postUpdate writes the body position back onto the sprite, after it.
+      // So at the moment we see blocked.down here, body.position is this frame's
+      // and enemy.y is still last frame's; the gap is one frame of travel (9.91 px
+      // at 617 px/s) and it leaked straight into the drop distance. Measured over
+      // a 15s bouncer: reading enemy.y the hop apex wandered up to 15.06 px (floor)
+      // / 16.01 px (roof) off the start line it is supposed to return to; reading
+      // body.center.y it is a rock-steady 3.30 px / 3.81 px, which is just the
+      // 60Hz Euler quantisation of the contact frame.
+      const s = (body.center.y - data.startingWorldY) * PRIVATE_SCALE * 2;
+      const t = s > 0 ? Math.sqrt(s / gravity) : 0;
       data.yVelFixed = -(gravity * t);
     } else if (data.waveConfig.verticalPlacement === VERTICAL_BOUNCE_ROOF) {
       if (!body.blocked.up) return;
 
-      // :974-979 — s = ((TOP_START_Y << bitshift) - y) * 2
-      const s = Math.abs(data.startingWorldY - enemy.y) * PRIVATE_SCALE * 2;
-      const t = Math.sqrt(s / gravity);
+      // :974-979 — s = ((TOP_START_Y << bitshift) - y) * 2, signed the other way.
+      // Same body.center.y-vs-enemy.y and same s <= 0 handling as the floor case.
+      const s = (data.startingWorldY - body.center.y) * PRIVATE_SCALE * 2;
+      const t = s > 0 ? Math.sqrt(s / gravity) : 0;
       data.yVelFixed = gravity * t;
     } else {
       return;
@@ -1729,6 +1786,15 @@ export default class EnemySystem {
     bullet.setDisplaySize(12, 4);
     bullet.setTint(0xff4444);
 
+    // Join the group FIRST: PhysicsGroup.createCallbackHandler replays
+    // `defaults` on every add() (PhysicsGroup.js:165-192, :217-229), and those
+    // defaults include setVelocityX/Y(0) and setAllowGravity(true). Adding after
+    // the setVelocity() below — the old order — zeroed the shot: measured
+    // spawnEnemyBullet(vx=120, vy=-45) producing a body with velocity (0, 0), so
+    // enemy fire just hung in the air at the muzzle until the camera scrolled it
+    // off screen and cleanupBullets() reaped it.
+    this.enemyBulletGroup.add(bullet);
+
     const body = bullet.body as Phaser.Physics.Arcade.Body;
     body.setCircle(4);
     body.setVelocity(vx, vy);
@@ -1736,7 +1802,6 @@ export default class EnemySystem {
     body.setCollideWorldBounds(false);
 
     (bullet as any)._isEnemyBullet = true;
-    this.enemyBulletGroup.add(bullet);
     this.enemyBulletCount++;
   }
 

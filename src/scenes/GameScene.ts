@@ -664,10 +664,12 @@ export default class GameScene extends Phaser.Scene {
           // C++ generic_level_enemy.txt:578-600 — the bubble drops a paintdrop
           // carrying its own colour, and (for the one pre-chosen bubble of the
           // wave) the wave's special bonus. Specials come ONLY from paint bubbles.
+          const color = enemyData?.paintColor ?? 0;
           if (this.paintBubbleCarriesSpecial(enemyData)) {
-            this.spawnSpecialPaintball(e.x, e.y, this.pickSpecialBonusType());
+            // The special drop still carries the bubble's colour (:579-580), so it
+            // splats in that colour if the cat never reaches it.
+            this.spawnSpecialPaintball(e.x, e.y, this.pickSpecialBonusType(), color);
           } else {
-            const color = enemyData?.paintColor ?? 0;
             this.spawnPaintDrop(color, e.x, e.y);
           }
         } else {
@@ -1002,8 +1004,32 @@ export default class GameScene extends Phaser.Scene {
    * Polled right after enemySystem.update() and latched, so it fires once on the
    * transition to zero and hands off to the same handler a kill uses.
    */
+  /**
+   * C++ main_game_controller.txt check_enemy_count:1155-1162 —
+   *   let enemy_count = read_from_array (... LEVEL_ENEMY_COUNT_ARRAY_ID ...)
+   *   let pearl_count = get_global_flag (current_level_pearl_count)
+   *   let enemy_count = enemy_count + pearl_count
+   *   if enemy_count = 0 then ...
+   * The level is only "empty" once the uncollected BONUS PEARLS are gone too, so
+   * pearls lying on the floor hold the replacement wave (and its 1000 points) off.
+   * The port tested the enemy count alone, which let a level with a pearl still on
+   * the field re-spawn a full wave and pay out.
+   */
+  private levelIsEmpty(): boolean {
+    return this.enemySystem.getActiveEnemyCount() === 0 && this.getActiveBonusPearlCount() === 0;
+  }
+
+  private getActiveBonusPearlCount(): number {
+    let count = 0;
+    this.bonusPearlGroup.children.each((child: Phaser.GameObjects.GameObject) => {
+      if ((child as Phaser.Physics.Arcade.Sprite).active) count++;
+      return true;
+    });
+    return count;
+  }
+
   private checkEnemyCountReachedZero(): void {
-    if (this.enemySystem.getActiveEnemyCount() > 0) {
+    if (!this.levelIsEmpty()) {
       this.enemyCountZeroHandled = false;
       return;
     }
@@ -1015,11 +1041,24 @@ export default class GameScene extends Phaser.Scene {
   private handlePostEnemyRemoval(): void {
     this.checkLevelCompletion();
 
-    if (!this.isLevelComplete() && this.enemySystem.maybeSpawnReplacementWave(this.currentLevel)) {
-      if (this.enemySystem.isInMoleculePhase()) {
-        return;
-      }
+    // checkLevelCompletion() may have started the stage handoff; the C++ swaps the
+    // main_game_controller to LEVEL_RESET_FLAG_GET_READY_FOR_BONUS at that point and
+    // stops running check_enemy_count at all, so nothing may spawn behind the
+    // COLOUR MATCHED banner. Without this the port dropped a fresh 59-enemy wave and
+    // paid 1000 points ~1.4 s before scene.start('BonusLevel').
+    if (this.stageTransitioning || this.isLevelComplete()) return;
 
+    // The pearl term above is what actually suppresses the wave at the end of the
+    // molecule phase: molecule.txt:167 drops a bonus_pearl on EVERY molecule death,
+    // so current_level_pearl_count is >= 1 the instant the last molecule dies and
+    // check_enemy_count's sum cannot be zero. The port used to emulate that with an
+    // isInMoleculePhase() early-return here, which was dead code anyway —
+    // maybeSpawnReplacementWave() -> spawnEnemies() (EnemySystem.ts:296) clears
+    // moleculePhaseActive BEFORE the guard could read it, so clearing all 8 molecules
+    // paid 1400 = 8x50 + 1000. levelIsEmpty() now does the job for real.
+    if (!this.levelIsEmpty()) return;
+
+    if (this.enemySystem.maybeSpawnReplacementWave(this.currentLevel)) {
       this.addScore(1000);
 
       if (this.cache.audio.exists('spawn_new_wave_sound')) {
@@ -1063,6 +1102,14 @@ export default class GameScene extends Phaser.Scene {
         // the ball. Without this field the bonus level cannot tell "no shield" from
         // "shield we forgot to send" and has to assume the former.
         shieldEnergy: this.wizballShieldEnergy,
+        // The SAME else branch (wizball.txt:931-937) re-spawns catellite_shield_swirl_layer
+        // whenever CATELLITE_INVULNERABILITY_BITFLAG is set, again without touching
+        // cat_shield_stored_health — only the new-life branch at :918 resets that to
+        // SHIELD_STARTING_ENERGY. So the cat's remainder carries over exactly like the
+        // ball's. 906af0f threaded the wizball's half and missed this one, which left
+        // weaponCollection still carrying CATELLITE_INVULNERABILITY (1024) into the
+        // bonus level with no counter behind it — a cat flagged as shielded with no shield.
+        catShieldEnergy: this.catShieldEnergy,
         levelProgress: this.levelProgress,
         cauldronFill: this.cauldronFill,
         levelCompletion: this.levelCompletion,
@@ -1526,6 +1573,15 @@ export default class GameScene extends Phaser.Scene {
       sprite.setDisplaySize(16, 16);
     }
 
+    // Arcade.Group.add() runs createCallbackHandler(), which replays EVERY key in
+    // the group's `defaults` onto the body — and an Arcade group built with no
+    // config defaults gravityX/Y, velocityX/Y and bounceX/Y to 0. So a body
+    // configured BEFORE the add is silently wiped: with main.ts world gravity at
+    // {0,0} the drop then had no gravity and no velocity at all and simply hung
+    // where the bubble died, never falling, never splatting (paintdrop.txt:180-195)
+    // and never reaching the off-world cull. Join the group first, configure after.
+    this.paintGroup.add(sprite);
+
     const body = sprite.body as Phaser.Physics.Arcade.Body;
     // Hitbox matches the drip's bulb (bottom of the teardrop)
     body.setCircle(6, useAtlas ? 0 : 2, useAtlas ? 8 : 2);
@@ -1536,8 +1592,6 @@ export default class GameScene extends Phaser.Scene {
     body.setBounce(0.2, 0.1);
 
     (sprite as any).paintColor = color;
-
-    this.paintGroup.add(sprite);
   }
 
   private setupCollisions(): void {
@@ -1620,7 +1674,29 @@ export default class GameScene extends Phaser.Scene {
     return SpecialPaintballType.FREAKY_BITS;
   }
 
-  private spawnSpecialPaintball(x: number, y: number, type: SpecialPaintballType): void {
+  /**
+   * C++ generic_level_enemy.txt:578-590 — a killed paint bubble spawns exactly ONE
+   * `paintdrop`, setting BOTH paint_bubble_colour_flag and (unless a freak-out is
+   * running) paint_bubble_special_bonus_flag on it. So a "special paintball" is not
+   * a separate entity: it is a paintdrop that happens to carry a bonus, and it runs
+   * the whole of paintdrop.txt — falls at PAINTDROP_FALLING_SPEED (:75), splats into
+   * a coloured stain on a vertical world hit (:180-195, which forwards colour_flag
+   * AND special_bonus_flag to the stain), and self-kills below the world (:98-100).
+   *
+   * Since 906af0f only the CATELLITE can collect one (paintdrop.txt:108). Before
+   * this fix the special was spawned with no gravity, no velocity and no cull path,
+   * so with main.ts world gravity at {0,0} — and the starting loadout carrying no
+   * CATELLITE — every special dropped before the cat was bought simply hung in the
+   * air for the rest of the level. It now shares the plain drop's lifecycle: the
+   * same fall parameters as spawnPaintDrop() and the same cull in cleanupPaintDrops().
+   *
+   * The old idle animation was a ±8px bob on `y`. That is doubly wrong: paintdrop's
+   * main_loop (:84-92) pulses opengl_scale_x/y by sin/cos of a counter — a squash-
+   * and-stretch, not a bob — and a tween writing sprite.y is copied straight back
+   * into the Arcade body by Body.preUpdate -> updateFromGameObject() every frame,
+   * which would pin the drop in place and cancel the fall outright.
+   */
+  private spawnSpecialPaintball(x: number, y: number, type: SpecialPaintballType, color: number): void {
     const textureMap: Record<SpecialPaintballType, string> = {
       [SpecialPaintballType.EXTRA_LIFE]: 'sp_extra_life',
       [SpecialPaintballType.FILTH_RAID]: 'sp_filth_raid',
@@ -1633,21 +1709,33 @@ export default class GameScene extends Phaser.Scene {
     const sprite = this.physics.add.sprite(x, y, textureKey);
     sprite.setDepth(Depth.PEARL);
     sprite.setDisplaySize(32, 32);
-    sprite.setBounce(0.5, 0.5);
-    sprite.body.setCircle(12, 4, 4);
     (sprite as any).specialType = type;
+    // The stain still splats in the bubble's colour — generic_level_enemy.txt:579-580
+    // sets colour_flag on the drop whether or not it also carries a bonus.
+    (sprite as any).paintColor = color;
 
-    // Bobbing animation
+    // Group first, body second — Arcade.Group.add() replays the group's defaults
+    // (gravity 0, velocity 0) over the body, so anything set before the add is lost.
+    this.specialPaintballGroup.add(sprite);
+
+    const body = sprite.body as Phaser.Physics.Arcade.Body;
+    body.setCircle(12, 4, 4);
+    body.setCollideWorldBounds(false);
+    body.setAllowGravity(true);
+    body.setGravityY(160); // same PAINTDROP_FALLING_SPEED stand-in the plain drop uses
+    body.setVelocity((Math.random() - 0.5) * 30, 0);
+    body.setBounce(0.2, 0.1);
+
+    // paintdrop.txt:84-92 — opengl_scale_x/y = 10000 + 1000*sin/cos(counter).
     this.tweens.add({
       targets: sprite,
-      y: sprite.y - 8,
+      scaleX: sprite.scaleX * 1.1,
+      scaleY: sprite.scaleY * 0.9,
       duration: 400,
       yoyo: true,
       repeat: -1,
       ease: 'Sine.easeInOut'
     });
-
-    this.specialPaintballGroup.add(sprite);
   }
 
   private collectSpecialPaintball(_collector: any, paintball: any): void {
@@ -1663,6 +1751,11 @@ export default class GameScene extends Phaser.Scene {
     (sprite as any)._collected = true;
 
     const type = (sprite as any).specialType as SpecialPaintballType;
+
+    // Stop the infinite idle pulse before the pickup flourish: both write scaleX/
+    // scaleY, so left running the pulse would fight the pop-and-fade, and Phaser
+    // keeps an infinite tween playing even after its target is destroyed.
+    this.tweens.killTweensOf(sprite);
 
     // Visual pickup effect
     this.tweens.add({
@@ -1764,7 +1857,7 @@ export default class GameScene extends Phaser.Scene {
     this.worldColliders.forEach(collider => collider.destroy());
     this.worldColliders = [];
 
-    if (!this.paintGroup || !this.enemySystem) {
+    if (!this.paintGroup || !this.specialPaintballGroup || !this.enemySystem) {
       return;
     }
 
@@ -1779,6 +1872,12 @@ export default class GameScene extends Phaser.Scene {
       }
       this.worldColliders.push(
         this.physics.add.collider(this.paintGroup, target)
+      );
+      // The special-bonus drop IS a paintdrop (paintdrop.txt is one script for both),
+      // so it needs the same terrain collider or it would never register the vertical
+      // world hit that splats it at :180-195.
+      this.worldColliders.push(
+        this.physics.add.collider(this.specialPaintballGroup, target)
       );
       this.worldColliders.push(
         this.physics.add.collider(this.enemySystem.getEnemyGroup(), target)
@@ -1799,6 +1898,9 @@ export default class GameScene extends Phaser.Scene {
       }
       this.worldColliders.push(
         this.physics.add.collider(this.paintGroup, this.collisionLayer)
+      );
+      this.worldColliders.push(
+        this.physics.add.collider(this.specialPaintballGroup, this.collisionLayer)
       );
       this.worldColliders.push(
         this.physics.add.collider(this.enemySystem.getEnemyGroup(), this.collisionLayer)
@@ -3101,8 +3203,17 @@ export default class GameScene extends Phaser.Scene {
     });
   }
 
+  // paintdrop.txt is ONE entity script for the plain colour drop and the
+  // special-bonus drop alike, so both retire the same way. The specials used to
+  // have no cull at all and, with no gravity either, hung in the air forever when
+  // no CATELLITE was owned to collect them.
   private cleanupPaintDrops(): void {
-    this.paintGroup.children.each((child: Phaser.GameObjects.GameObject) => {
+    this.cullPaintDropGroup(this.paintGroup);
+    this.cullPaintDropGroup(this.specialPaintballGroup);
+  }
+
+  private cullPaintDropGroup(group: Phaser.Physics.Arcade.Group): void {
+    group.children.each((child: Phaser.GameObjects.GameObject) => {
       const sprite = child as Phaser.Physics.Arcade.Sprite;
       if (!sprite.active || (sprite as any)._collected) return true;
       // C++ paintdrop.world_interaction_routine: a drop that hits the ground
@@ -3110,10 +3221,15 @@ export default class GameScene extends Phaser.Scene {
       const body = sprite.body as Phaser.Physics.Arcade.Body | null;
       if (body && body.blocked.down) {
         this.spawnPaintStain(sprite.x, sprite.y + 6, (sprite as any).paintColor ?? 0);
+        // The special drop carries an infinite idle-pulse tween. Phaser does NOT
+        // stop a tween when its target is destroyed — measured: five destroyed
+        // specials left five isPlaying() tweens behind — so it has to go first.
+        this.tweens.killTweensOf(sprite);
         sprite.destroy();
         return true;
       }
       if (sprite.y > this.worldHeight + 30 || sprite.x < -30 || sprite.x > this.worldWidth + 30) {
+        this.tweens.killTweensOf(sprite);
         sprite.destroy();
       }
       return true;
