@@ -426,6 +426,16 @@ export default class GameScene extends Phaser.Scene {
     this.cauldronFill = data.cauldronFill ? [...data.cauldronFill] : [0, 0, 0, 0];
     this.stageTransitioning = false;
     this.respawnInvulnFrames = 0;
+    // Deliberately NOT seeded from data.shieldEnergy / data.catShieldEnergy, even
+    // though the bonus level and the laboratory both relay them here. Arriving from
+    // the lab is the new-life path, and wizball.txt:177-179 re-equips it from
+    // wizball_starting_loadout — the PERMANENT loadout, which the lab can only ever
+    // write pearl-selected upgrades into, never the temporary INVULNERABILITY bit.
+    // So the `if weapon_collection & INVULNERABILITY_BITFLAG` gate at wizball.txt:908
+    // cannot fire on this leg and the stored shield health is unused by the original
+    // too. The relay exists because the counters are live across Game -> Bonus (where
+    // :908 DOES fire, via the main_game_controller branch at :182-186); it stopping
+    // here is correct, not a dropped hop.
     this.catShieldEnergy = 0;
     this.wizballShieldEnergy = 0;
     // Phaser reuses the scene instance across scene.start(), so field initialisers
