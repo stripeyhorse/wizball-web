@@ -80,17 +80,25 @@ Sprite sheets and atlases are converted straight out of that tree's `sprites/` d
 atlases get their Phaser JSON from `generate-atlas-json.js`, which reads the original
 `[arb].txt` frame lists. Both are kept next to the PNG so the mapping stays checkable.
 
+## Credits
+
+**Wizball** (1987) — designed by Jon Hare and Chris Yates, programmed by Chris Yates,
+graphics by Jon Hare, music by Martin Galway.
+
+**The 2007 Retrospec remake**, which this port follows — programming by Graham Goring,
+graphics by Trevor "Smila" Storey, music and arrangements by Infamous (Chris Nunn), Mac
+conversion by Peter Hull, Linux conversion by Scott Wightman. Its source was recovered and
+revived in 2026 by [Craig Chandler](https://github.com/craigchandler/wizball-remake) —
+that archive is where this port's C++ reference, art and audio all come from.
+
 ## Licence
 
-The source code is MIT — see [LICENSE](LICENSE).
+This port's own code is MIT — see [LICENSE](LICENSE).
 
-**The game content is not.** Everything under `public/assets/` and the datatables under
-`src/data/` are Wizball's: sprites, tilemaps, sound effects, music and tuning tables
-derived from the 1987 Ocean / Sensible Software original and from the Retrospec C++
-remake. They belong to their respective owners, they are here for a non-commercial port,
-and the MIT grant does not extend to them.
+The game content (sprites, tilemaps and audio under `public/assets/`, and the datatables
+transcribed into `src/data/`) comes from the Retrospec remake source archive, which is
+itself MIT licensed. That notice is reproduced in `LICENSE`, as MIT requires.
 
-Practically: the repo is private, and that is the right default. Making it public, or
-hosting the built game somewhere discoverable, publishes that content too — worth
-resolving deliberately rather than by accident. Wizball fan projects have generally been
-tolerated, but tolerated is not licensed.
+Wizball itself is nobody in that chain's to license. This is a non-commercial fan port,
+published in the same spirit as the archive it builds on. If a rights holder would rather
+it weren't up, it comes down.

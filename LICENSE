@@ -24,12 +24,42 @@ SOFTWARE.
 
 SCOPE
 
-This licence covers the original source code in this repository: everything
-under src/, the build configuration, and the documentation.
+The licence above covers the original work in this repository: the TypeScript
+source under src/, the build configuration and the documentation.
 
-It does NOT cover the game content under public/assets/ — sprites, tilemaps,
-sound effects, music — or the transcribed datatables under src/data/. Those are
-derived from Wizball (Ocean Software / Sensible Software, 1987) and from the
-Retrospec C++ remake, and remain the property of their respective owners. They
-are included here for a non-commercial port and are not licensed for reuse by
-this file. See the "Licence" section of README.md.
+The game content — the sprites, tilemaps, sound effects and music under
+public/assets/, and the datatables transcribed into src/data/ — comes from the
+Retrospec Wizball remake source archive, which is distributed under the MIT
+licence reproduced below. That notice travels with this repository as MIT
+requires.
+
+Note that the underlying game, Wizball (Sensible Software, 1987), and its names
+and characters are not any contributor's to license. This is a non-commercial
+fan port; see the "Licence" section of README.md.
+
+---
+
+THIRD-PARTY: Retrospec Wizball remake source archive
+https://github.com/craigchandler/wizball-remake
+
+MIT License
+
+Copyright (c) 2026 Craig Chandler
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
