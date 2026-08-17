@@ -139,7 +139,41 @@ const SHIELD_CORE_NEAR_EDGE = 16;
 const SHIELD_CORE_FAR_EDGE = 48;
 const SHIELD_CORE_HALF_WIDTH = 24;
 const SHIELD_CORE_LIFETIME = 20;    // frames it survives after FIRE is released (:81, 115-123)
-const SHIELD_CORE_WAVE_PERIOD = 10; // a visual wave child every 10 frames (:95-108)
+// :101 — `spawn_loop + 1 !> 10 ? 0` counts 0..10 inclusive, so a wave child every
+// 11 frames, and :96-99 plays the pulse only from the LOWER core and only on
+// alternate spawns, i.e. one sound every 22 frames.
+const SHIELD_CORE_WAVE_PERIOD = 11;
+// The core's drawn height eases 25%/frame toward the distance to the nearest
+// tile (capped at ideal_world_collision_height = 48) and the waves blank out
+// once it drops below 3 px — core.txt .check_squash_sub_loop.
+const SHIELD_SQUASH_EASE = 2500;
+const SHIELD_MIN_HEIGHT = 3;
+// wizball_alternate_shield_bullet_wave.txt:22-33 — each wave child starts at
+// 50%/25% scale, eases toward 100% at 2.5%/frame horizontally and 5%/frame
+// vertically, then fades out 15/255 per frame once it is past 70% wide.
+const SHIELD_WAVE_START_X_SCALE = 5000;
+const SHIELD_WAVE_START_Y_SCALE = 2500;
+const SHIELD_WAVE_X_EASE = 250;
+const SHIELD_WAVE_Y_EASE = 500;
+const SHIELD_WAVE_FADE_AT = 7000;
+const SHIELD_WAVE_FADE_STEP = 15;
+// player_bullets[arb] frame 2 "Alternate Shield": 78x32 with pivot (39, -32).
+// The negative pivot Y is the whole trick — the quad hangs entirely BELOW its
+// anchor, from 32 to 64 px out, so it never straddles the ball. Phaser takes the
+// same thing as a fractional origin, and origins outside 0..1 are legal.
+const SHIELD_WAVE_FRAME = 'bullets_2';
+const SHIELD_WAVE_WIDTH = 78;
+const SHIELD_WAVE_HEIGHT = 32;
+const SHIELD_WAVE_ORIGIN_X = 39 / SHIELD_WAVE_WIDTH;
+const SHIELD_WAVE_ORIGIN_Y = -32 / SHIELD_WAVE_HEIGHT;
+
+/**
+ * The C++ scripting language's `a >% b p` — move `a` toward `b` by p/10000 of the
+ * gap, once. Used for both the shield core's squash and its waves' expansion.
+ */
+function easeTowards(current: number, target: number, percentage: number): number {
+  return current + (target - current) * (percentage / 10000);
+}
 
 // C++ smart_bomb_shockwave.txt: two ENT_TYPE_PLAYER_BULLET waves pinned to
 // world_y 208, 56×416 collision from frame, sweeping outward at ±8 px/frame and
@@ -308,7 +342,18 @@ export default class GameScene extends Phaser.Scene {
   private shieldCores: Phaser.Physics.Arcade.Sprite[] = []; // SHIELD_FIRE upper/lower cores
   private shieldCoreLifetime: number = 0;  // C++ core lifetime, 20 frames past FIRE release
   private shieldCoreWaveCounter: number = 0;
-  private shieldCoreGfx: Phaser.GameObjects.Graphics | null = null;
+  private shieldPulseToggle: number = 1; // C++ sound_pulse_toggle (:52, :96-103)
+  private shieldCoreHeights: number[] = [0, 0]; // current_height per core, index 0 = upper
+  // The expanding arcs shed by the cores. Scales are kept in the C++'s
+  // percent-of-10000 fixed point and alpha in its 0..255, so the transcribed
+  // easing constants can be used as written.
+  private shieldWaves: {
+    sprite: Phaser.GameObjects.Image;
+    index: number;
+    idealX: number;
+    idealY: number;
+    alpha: number;
+  }[] = [];
   // C++ main_game_controller.txt LEVEL_COMPLETION_ARRAY_ID — colour stages (0..3)
   // banked per level, plus the derived warp-reachable window.
   private levelCompletion: number[] = new Array(LEVEL_COUNT).fill(0);
@@ -467,9 +512,11 @@ export default class GameScene extends Phaser.Scene {
     this.sharedNextBulletAlternator = 1; // C++ wizball.txt:199
     this.spreadFlipSide = false;
     this.shieldCores = [];
-    this.shieldCoreGfx = null;
+    this.shieldWaves = [];
     this.shieldCoreLifetime = 0;
     this.shieldCoreWaveCounter = 0;
+    this.shieldPulseToggle = 1;
+    this.shieldCoreHeights = [0, 0];
     this.waveSpecialState = new WeakMap();
     this.resetWobbleState();
     this.applyWeaponMovementStyle();
@@ -640,15 +687,14 @@ export default class GameScene extends Phaser.Scene {
       g.destroy();
     }
 
-    // C++ wizball_alternate_shield_bullet_core draws player_bullets frame 2 (the
-    // 78x32 "Alternate Shield" bar) stretched toward the floor / ceiling.
+    // Stand-in for player_bullets frame 2, the 78x32 "Alternate Shield" arc, for
+    // the case where the bullets atlas failed to load. Same footprint as the real
+    // frame so the pivot maths in updateShieldWaves() still lands correctly.
     if (!this.textures.exists('shield_fire_bar')) {
       const g = this.add.graphics();
       g.fillStyle(0x66ccff, 0.85);
-      g.fillRect(0, 0, SHIELD_CORE_HALF_WIDTH * 2, 8);
-      g.fillStyle(0xffffff, 0.9);
-      g.fillRect(SHIELD_CORE_HALF_WIDTH - 6, 0, 12, 8);
-      g.generateTexture('shield_fire_bar', SHIELD_CORE_HALF_WIDTH * 2, 8);
+      g.fillEllipse(SHIELD_WAVE_WIDTH / 2, SHIELD_WAVE_HEIGHT, SHIELD_WAVE_WIDTH, SHIELD_WAVE_HEIGHT * 2);
+      g.generateTexture('shield_fire_bar', SHIELD_WAVE_WIDTH, SHIELD_WAVE_HEIGHT);
       g.destroy();
     }
   }
@@ -2680,7 +2726,12 @@ export default class GameScene extends Phaser.Scene {
    * rectangle sits 16..48 px further out, 24 px either side (:41-49 — note the
    * stretch code at :168-189 that would have resized the box is commented out, so
    * only the DRAWN bar stretches toward the floor/ceiling). The cores outlive the
-   * button by 20 frames (:81, :115-123) and pulse a wave every 10 (:95-108).
+   * button by 20 frames (:81, :115-123) and shed a wave every 11 (:95-108).
+   *
+   * The core itself is `draw_mode_invisible` (:set_up_image) — everything you see
+   * is its wave children, each an additively-blended copy of player_bullets frame
+   * 2 expanding away from the ball and fading out. This used to be drawn as two
+   * solid cyan bars, which is where the "strange" look came from.
    */
   private updateShieldFire(): void {
     const hasShield = (this.weaponCollection & WeaponFlag.SHIELD_FIRE) !== 0;
@@ -2703,8 +2754,8 @@ export default class GameScene extends Phaser.Scene {
       this.clearShieldCores();
       for (let i = 0; i < 2; i++) {
         const core = this.physics.add.sprite(this.player.x, this.player.y, 'shield_fire_bar');
-        core.setDepth(Depth.WIZBALL_SHIELD);
-        core.setVisible(false); // the visible part is drawn in shieldCoreGfx below
+        core.setDepth(Depth.WIZBALL_BULLET); // WIZBALL_BULLET_DRAW_ORDER (:set_up_image)
+        core.setVisible(false); // draw_mode_invisible — only its wave children show
         (core as Phaser.Physics.Arcade.Sprite & { _isShieldOrb: boolean })._isShieldOrb = true;
         // Group first, body second — Arcade.Group.add() replays the group's
         // `defaults` over the body (PhysicsGroup.js:217-229), which turns
@@ -2718,27 +2769,12 @@ export default class GameScene extends Phaser.Scene {
         this.shieldCores.push(core);
       }
       this.shieldCoreWaveCounter = 0;
-      if (this.cache.audio.exists('wizball_up_down_shield_pulse')) {
-        this.sound.play('wizball_up_down_shield_pulse', { volume: 0.13 });
-      }
+      this.shieldPulseToggle = 1; // :52 — the toggle starts set, so the first spawn sounds
+      this.shieldCoreHeights = [0, 0];
     }
-
-    // C++ :95-108 — a wave child every 10 frames, with the pulse SFX on alternate
-    // spawns from the lower core.
-    this.shieldCoreWaveCounter = (this.shieldCoreWaveCounter + 1) % SHIELD_CORE_WAVE_PERIOD;
-    const pulse = this.shieldCoreWaveCounter === 0;
-    if (pulse && this.cache.audio.exists('wizball_up_down_shield_pulse')) {
-      this.sound.play('wizball_up_down_shield_pulse', { volume: 0.13 });
-    }
-
-    if (!this.shieldCoreGfx) {
-      this.shieldCoreGfx = this.add.graphics();
-      this.shieldCoreGfx.setDepth(Depth.WIZBALL_SHIELD);
-      this.shieldCoreGfx.setBlendMode(Phaser.BlendModes.ADD);
-    }
-    this.shieldCoreGfx.clear();
 
     // sign -1 = the upper core (spawned at y-15), +1 = the lower one (y+15).
+    const spawning = this.shieldCoreWaveCounter === 0;
     [-1, 1].forEach((sign, index) => {
       const core = this.shieldCores[index];
       if (!core) return;
@@ -2751,14 +2787,75 @@ export default class GameScene extends Phaser.Scene {
       );
       (core.body as Phaser.Physics.Arcade.Body).reset(core.x, core.y);
 
-      // C++ :155-166 — the DRAWN bar reaches out to the nearest tile in that
-      // direction, capped at ideal_world_collision_height (48).
-      const reach = this.distanceToSolidTile(this.player.x, coreY, sign, SHIELD_CORE_FAR_EDGE);
-      const top = sign < 0 ? coreY - reach : coreY;
-      this.shieldCoreGfx!.fillStyle(0x66ccff, pulse ? 0.75 : 0.5);
-      this.shieldCoreGfx!.fillRect(this.player.x - SHIELD_CORE_HALF_WIDTH, top, SHIELD_CORE_HALF_WIDTH * 2, reach);
-      this.shieldCoreGfx!.fillStyle(0xffffff, 0.55);
-      this.shieldCoreGfx!.fillRect(this.player.x - 6, top, 12, reach);
+      // C++ .check_squash_sub_loop — current_height eases toward the distance to
+      // the nearest tile in that direction, capped at 48. It is an ease, not a
+      // snap: the arcs visibly shorten as you settle onto the floor.
+      const target = this.distanceToSolidTile(this.player.x, coreY, sign, SHIELD_CORE_FAR_EDGE);
+      this.shieldCoreHeights[index] = easeTowards(
+        this.shieldCoreHeights[index], target, SHIELD_SQUASH_EASE
+      );
+
+      if (spawning) this.spawnShieldWave(index);
+    });
+
+    // :96-103 — the pulse comes from the lower core only, on alternate spawns.
+    if (spawning) {
+      if (this.shieldPulseToggle === 1 && this.cache.audio.exists('wizball_up_down_shield_pulse')) {
+        this.sound.play('wizball_up_down_shield_pulse', { volume: 0.13 });
+      }
+      this.shieldPulseToggle = 1 - this.shieldPulseToggle;
+    }
+    this.shieldCoreWaveCounter = (this.shieldCoreWaveCounter + 1) % SHIELD_CORE_WAVE_PERIOD;
+
+    this.updateShieldWaves();
+  }
+
+  /**
+   * One wave child: a copy of the core's arc that expands away from the ball and
+   * fades (wizball_alternate_shield_bullet_wave.txt). `index` 0 is the upper core,
+   * whose arc is the same frame turned through 180° about the anchor — a flip
+   * would mirror it in place and leave it on the wrong side.
+   */
+  private spawnShieldWave(index: number): void {
+    const useAtlas = this.textures.exists('bullets')
+      && this.textures.get('bullets').has(SHIELD_WAVE_FRAME);
+    const sprite = useAtlas
+      ? this.add.image(this.player.x, this.player.y, 'bullets', SHIELD_WAVE_FRAME)
+      : this.add.image(this.player.x, this.player.y, 'shield_fire_bar');
+    sprite.setOrigin(SHIELD_WAVE_ORIGIN_X, SHIELD_WAVE_ORIGIN_Y);
+    sprite.setRotation(index === 0 ? Math.PI : 0); // :set_up_image, opengl_angle 18000 vs 0
+    sprite.setBlendMode(Phaser.BlendModes.ADD); // opengl_boolean_blend_add
+    sprite.setDepth(Depth.WIZBALL_BULLET); // WIZBALL_BULLET_DRAW_ORDER — under the ball
+    this.shieldWaves.push({
+      sprite,
+      index,
+      idealX: SHIELD_WAVE_START_X_SCALE,
+      idealY: SHIELD_WAVE_START_Y_SCALE,
+      alpha: 255,
+    });
+  }
+
+  private updateShieldWaves(): void {
+    const sign = [-1, 1];
+    this.shieldWaves = this.shieldWaves.filter(wave => {
+      wave.idealX = easeTowards(wave.idealX, 10000, SHIELD_WAVE_X_EASE);
+      wave.idealY = easeTowards(wave.idealY, 10000, SHIELD_WAVE_Y_EASE);
+      if (wave.idealX > SHIELD_WAVE_FADE_AT) {
+        wave.alpha = Math.max(0, wave.alpha - SHIELD_WAVE_FADE_STEP);
+        if (wave.alpha === 0) {
+          wave.sprite.destroy();
+          return false;
+        }
+      }
+
+      // The core's own squash multiplies into the child's scale, so an arc that
+      // is spawned while the ball hugs the floor comes out flattened too.
+      const height = this.shieldCoreHeights[wave.index] ?? 0;
+      wave.sprite.setPosition(this.player.x, this.player.y + sign[wave.index] * SHIELD_CORE_OFFSET);
+      wave.sprite.setScale(wave.idealX / 10000, (wave.idealY / 10000) * (height / SHIELD_CORE_FAR_EDGE));
+      wave.sprite.setAlpha(wave.alpha / 255);
+      wave.sprite.setVisible(height >= SHIELD_MIN_HEIGHT); // parent.signal
+      return true;
     });
   }
 
@@ -2767,7 +2864,11 @@ export default class GameScene extends Phaser.Scene {
       this.shieldCores.forEach(o => o.destroy());
       this.shieldCores = [];
     }
-    this.shieldCoreGfx?.clear();
+    // The waves are children of the cores in the C++ (`parent.alive <= 0` kills
+    // them), so they go when the cores do.
+    this.shieldWaves.forEach(w => w.sprite.destroy());
+    this.shieldWaves = [];
+    this.shieldCoreHeights = [0, 0];
   }
 
   /**

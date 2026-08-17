@@ -2,6 +2,7 @@ import * as Phaser from 'phaser';
 import { Depth } from '../config/depths';
 import {
   WaveConfig,
+  EnemySpriteDef,
   BULLET_TYPE_NONE,
   BULLET_TYPE_SINGLE_DIRECTED,
   BULLET_TYPE_SPREAD,
@@ -58,8 +59,9 @@ const SPREAD_ANGLES = [0, 4500, 9000, 13500, 18000, 22500, 27000, 31500];
 const MIN_WAVE_SIZE = 8;
 const MAX_WAVE_SIZE = 10;
 
-// Paint-bubble tints (0=Red, 1=Green, 2=Blue) — matches GameScene PAINT_FRAME_COLORS.
-const PAINT_TINTS = [0xff0000, 0x00ff00, 0x0000ff];
+// Paint colours are 0=Red, 1=Green, 2=Blue, which is also the frame order of the
+// paint bubbles at the head of the paintballs_and_drips atlas.
+const PAINT_COLOUR_COUNT = 3;
 const PAINT_BUBBLE_WAVE_COUNT = 3;
 
 interface WaveSpawnSlot {
@@ -183,6 +185,47 @@ interface EnemyData {
   baseWorldY: number;
   // Paint-bubble colour (0=R,1=G,2=B) so the dropped paint matches the bubble.
   paintColor?: number;
+  // C++ animation_counter (generic_level_enemy.txt:78, :317) — ticks once per
+  // frame and drives set_anim_frame; kept per enemy, not per wave.
+  animationCounter: number;
+  // C++ deform_angle / scale_deform_amount (:130-131) — the bounce squash. They
+  // are their own slots in the original, NOT aliases of behaviour_counter and
+  // stored_vertical_speed, which the owning types also use.
+  deformAngle: number;
+  deformAmount: number;
+  verticalContact: boolean;
+  spriteDef: EnemySpriteDef;
+  // The fuzz's additively-blended beam overlay (fuzz_overlay.txt), which tracks
+  // its parent's position and frame. Null for every other type.
+  overlay?: Phaser.GameObjects.Image | null;
+  overlayCounter?: number;
+}
+
+// C++ SCRIPTING_select_animation_frame (scripting.cpp:4556-4610). ANIM_SINE is
+// not one of the engine's modes — it is the planes' hand-rolled
+// `current_frame = frame_count sin animation_counter` (generic_level_enemy.txt:400).
+const ANIM_NONE = 0;
+const ANIM_LOOP = 1;
+const ANIM_PING_PONG = 2;
+const ANIM_SINE = 3;
+
+// The two 48x48 enemy sheets, the 32x32 paint-bubble atlas and the 64x64 fuzz
+// are all sliced exactly as the C++ slices them (output.cpp:1608-1632 floors on
+// both axes), so these frame numbers are the C++ frame numbers.
+const SPRITE_ENEMIES = 'enemies';
+const SPRITE_ENEMIES_02 = 'enemies02';
+const SPRITE_FUZZ = 'fuzz_base';
+
+// The lurking molecule isn't wave-spawned, so it carries its own definition
+// (C++ molecule.txt:31-35, :94).
+const MOLECULE_SPRITE: EnemySpriteDef = {
+  sheet: SPRITE_ENEMIES, baseFrame: 0, frameCount: 16, anim: 1 /* ANIM_LOOP */, delay: 2, size: 48,
+};
+
+function spriteDef(
+  sheet: string, baseFrame: number, frameCount: number, anim: number, delay: number, size = 48
+): EnemySpriteDef {
+  return { sheet, baseFrame, frameCount, anim, delay, size };
 }
 
 const BEHAVIOUR_STATE_PAUSED = 0;
@@ -318,8 +361,9 @@ export default class EnemySystem {
     this.moleculeSpawnSlots.forEach(slot => {
       const x = Phaser.Math.Between(slot.minX, slot.maxX);
       const y = Phaser.Math.Between(slot.minY, slot.maxY);
-      const molecule = this.scene.physics.add.sprite(x, y, 'enemies', 0);
-      molecule.setDisplaySize(48, 48);
+      // C++ molecule.txt:31-35 — enemies_01, frames 0-15 on a 2-frame delay.
+      const molecule = this.scene.physics.add.sprite(x, y, SPRITE_ENEMIES, MOLECULE_SPRITE.baseFrame);
+      molecule.setDisplaySize(MOLECULE_SPRITE.size, MOLECULE_SPRITE.size);
       molecule.setDepth(Depth.ENEMY);
 
       // Same PhysicsGroup.defaults hazard as spawnEnemyFromWave — add() replays
@@ -763,6 +807,127 @@ export default class EnemySystem {
     };
   }
 
+  /**
+   * Which sheet and frames a wave's children get. The C++ rolls this once in the
+   * spawn_*_wave script and hands the result to every child, so it is cached on
+   * the WaveConfig — a wave of up-and-downers is all one colour, not a mixture.
+   *
+   * Frame numbers are transcribed from each spawn script's BASE_FRAME /
+   * FRAME_COUNT, and the animation mode from the matching case in
+   * generic_level_enemy.txt:327-555.
+   */
+  private rollWaveSprite(wave: WaveConfig): EnemySpriteDef {
+    switch (wave.type) {
+      case EnemyType.PAINT_BUBBLES: {
+        // spawn_paintball_wave.txt:234-235 — the paintballs atlas, frame = colour.
+        const colour = wave.paintColor ?? 0;
+        const safe = colour >= 0 && colour < PAINT_COLOUR_COUNT ? colour : 0;
+        return spriteDef('paintballs', safe, 1, ANIM_NONE, 1, 32);
+      }
+      case EnemyType.HOLLOW_DIAMONDS: // spawn_hollow_diamond_wave.txt:127-131
+        return spriteDef(SPRITE_ENEMIES, 50, 1, ANIM_NONE, 1);
+      case EnemyType.CRABBY_BOUNCERS: // spawn_crabby_bouncer_wave.txt:148-150, anim :484
+        return spriteDef(SPRITE_ENEMIES, 75, 8, ANIM_PING_PONG, 2);
+      case EnemyType.MOLECULE_BOUNCERS: {
+        // spawn_molecule_bouncer_wave.txt:128, :166-169 — two colours, 16 frames.
+        const variant = Phaser.Math.Between(0, 1);
+        return spriteDef(SPRITE_ENEMIES, variant * 16 + 16, 16, ANIM_LOOP, 2);
+      }
+      case EnemyType.HOLLOW_CIRCLES: // spawn_hollow_circle_wave.txt:116-120
+        return spriteDef(SPRITE_ENEMIES, 49, 1, ANIM_NONE, 1);
+      case EnemyType.SOLID_DIAMONDS: // spawn_solid_diamond_wave.txt:111-115
+        return spriteDef(SPRITE_ENEMIES, 48, 1, ANIM_NONE, 1);
+      case EnemyType.BOBBLE_HATS: {
+        // spawn_bobble_hat_wave.txt:147-152 — the wave sub-type picks one of the
+        // two colours, i.e. base 75 or 83.
+        const subType = Phaser.Math.Between(0, 1);
+        return spriteDef(SPRITE_ENEMIES_02, 75 + subType * 8, 8, ANIM_LOOP, 4);
+      }
+      case EnemyType.PLANES: {
+        // spawn_plane_wave.txt:114-121, :160-166 — the firing plane is yellow
+        // (variant 2), the harmless one green (variant 1). The sine animation at
+        // :400 sweeps ±frame_count around the base, so the real span is 17 frames.
+        const variant = (wave.firingBehaviour & BULLET_TYPE_SINGLE_DIRECTED) !== 0 ? 2 : 1;
+        return spriteDef(SPRITE_ENEMIES_02, variant * 17 + 8, 8, ANIM_SINE, 1);
+      }
+      case EnemyType.UP_AND_DOWNERS: {
+        // spawn_up_and_downer_wave.txt:119, :151-157 — three colours, anim :379.
+        const variant = Phaser.Math.Between(0, 2);
+        return spriteDef(SPRITE_ENEMIES, variant * 8 + 51, 8, ANIM_PING_PONG, 2);
+      }
+      case EnemyType.BONUS_MOLECULE: // spawn_molecule_bonus_wave.txt:135-139, anim :550
+        return spriteDef(SPRITE_ENEMIES, 0, 16, ANIM_LOOP, 2);
+      case EnemyType.SOLID_DIAMONDS_DEVIANT: // spawn_solid_diamond_wave_deviant_type.txt:126-130
+        return spriteDef(SPRITE_ENEMIES, 48, 1, ANIM_NONE, 1);
+      case EnemyType.FUZZ: // spawn_fuzz.txt:115-117, anim :516
+        return spriteDef(SPRITE_FUZZ, 0, 16, ANIM_LOOP, 2, 64);
+      default:
+        return spriteDef(SPRITE_ENEMIES, 0, 1, ANIM_NONE, 1);
+    }
+  }
+
+  /**
+   * C++ SCRIPTING_select_animation_frame (scripting.cpp:4556-4610), plus the
+   * planes' sine sweep. Integer division throughout, as in the original.
+   */
+  private animationFrame(def: EnemySpriteDef, counter: number): number {
+    switch (def.anim) {
+      case ANIM_LOOP: {
+        const cycle = def.frameCount * def.delay;
+        return def.baseFrame + Math.floor((counter % cycle) / def.delay);
+      }
+      case ANIM_PING_PONG: {
+        const up = (def.frameCount - 1) * def.delay;
+        if (up <= 0) return def.baseFrame;
+        const modded = counter % (up * 2);
+        const step = modded >= up
+          ? def.frameCount - Math.floor((modded - up) / def.delay) - 1
+          : Math.floor(modded / def.delay);
+        return def.baseFrame + step;
+      }
+      case ANIM_SINE:
+        // :400 — `frame_count sin animation_counter`, i.e. amplitude frame_count
+        // over the engine's 0..35999 hundredths-of-a-degree angle.
+        return def.baseFrame + Math.trunc(def.frameCount * Math.sin((counter / 36000) * Math.PI * 2));
+      default:
+        return def.baseFrame;
+    }
+  }
+
+  private updateEnemyAnimation(enemy: Phaser.Physics.Arcade.Sprite, data: EnemyData): void {
+    const def = data.spriteDef;
+    if (def.anim === ANIM_NONE) return;
+
+    enemy.setFrame(this.animationFrame(def, data.animationCounter));
+    // The planes step their angle by 400 and wrap at 35999 (:403); everything
+    // else counts plain frames.
+    data.animationCounter = def.anim === ANIM_SINE
+      ? (data.animationCounter + 400) % 36000
+      : data.animationCounter + 1;
+
+    if (data.overlay) this.updateFuzzOverlay(enemy, data);
+  }
+
+  /**
+   * fuzz_overlay.txt — an additive copy of the fuzz's frame pinned to it, with
+   * its red and blue vertex colours swinging in antiphase (`128 sin counter`) at
+   * half alpha, which is what gives the fuzz its shimmer.
+   */
+  private updateFuzzOverlay(enemy: Phaser.Physics.Arcade.Sprite, data: EnemyData): void {
+    const overlay = data.overlay!;
+    if (!overlay.active) { data.overlay = null; return; }
+    overlay.setPosition(enemy.x, enemy.y);
+    overlay.setFrame(enemy.frame.name);
+    overlay.setFlipX(enemy.flipX);
+    overlay.setVisible(enemy.visible);
+    const counter = data.overlayCounter ?? 0;
+    const swing = Math.trunc(128 * Math.sin((counter / 36000) * Math.PI * 2));
+    overlay.setTint(Phaser.Display.Color.GetColor(
+      Phaser.Math.Clamp(128 - swing, 0, 255), 128, Phaser.Math.Clamp(128 + swing, 0, 255)
+    ));
+    data.overlayCounter = (counter + 1000) % 36000;
+  }
+
   private randomWaveSize(): number {
     // C++ spawn_*_wave.txt: sqr(rand(MIN^2, MAX^2)) — the engine's integer sqrt
     // truncates, it doesn't round.
@@ -772,11 +937,24 @@ export default class EnemySystem {
   }
 
   private spawnEnemyFromWave(x: number, y: number, wave: WaveConfig, _level: number): void {
-    const spriteKey = wave.type < 8 ? 'enemies' : 'enemies02';
-    const frame = wave.type % 8;
+    // Paint bubbles are the one wave type the C++ draws from a different sheet:
+    // spawn_paintball_wave.txt:233-234 sets SPRITE = paintballs_and_drips[arb] and
+    // BASE_FRAME = paint_bubble_colour_flag, i.e. atlas frames 0/1/2 = the red,
+    // green and blue 32x32 spheres. Everything else comes off the 48x48 enemy
+    // sheets. This used to fall through to ('enemies', 0), which is the red
+    // molecule cluster, tinted — so paint bubbles rendered as coloured molecules.
+    const isPaintBubble = wave.type === EnemyType.PAINT_BUBBLES;
+    const paintColor = wave.paintColor ?? 0;
+    // Rolled once per wave and cached, so a wave is all one colour variant.
+    const def = wave.spriteDef ?? (wave.spriteDef = this.rollWaveSprite(wave));
+    const sheet = this.scene.textures.exists(def.sheet) ? def.sheet : SPRITE_ENEMIES;
+    const frame: string | number = isPaintBubble ? `paintballs_${def.baseFrame}` : def.baseFrame;
 
-    const enemy = this.scene.physics.add.sprite(x, y, spriteKey, frame);
-    enemy.setDisplaySize(48, 48);
+    const enemy = this.scene.physics.add.sprite(x, y, sheet, frame);
+    // Native frame size: 32x32 for the atlas sphere, 48x48 for the enemy sheets,
+    // 64x64 for the fuzz. Keeping scale at 1 matters because the squash/stretch
+    // deform below resets with setScale(1, 1).
+    enemy.setDisplaySize(def.size, def.size);
     enemy.setDepth(Depth.ENEMY);
     enemy.setAlpha(1);
     enemy.setVisible(true);
@@ -800,8 +978,16 @@ export default class EnemySystem {
     this.enemyGroup.add(enemy);
 
     const body = enemy.body as Phaser.Physics.Arcade.Body;
+    // C++ SET_COLLISION_FROM_FRAME -8 (generic_level_enemy.txt:238) — the frame
+    // inset by 8 px a side, i.e. a centred 32x32 box on a 48x48 frame. The fuzz
+    // uses -16 on its 64x64 frame (:233) and the paint bubble's frame is already
+    // 32x32, so in every case it is a 32px circle centred in the frame.
+    // Phaser needs the offset spelled out: setCircle()'s default offsetY is
+    // `halfHeight - radius`, which after setSize(32, 32) is 0 and would pin the
+    // circle to the top of the frame.
+    const inset = (def.size - 32) / 2;
     body.setSize(32, 32);
-    body.setCircle(16, 8.5);
+    body.setCircle(16, inset, inset);
     body.setCollideWorldBounds(true);
     body.setBounce(1, 1);
 
@@ -856,6 +1042,11 @@ export default class EnemySystem {
       startingXVel: hSpeed,
       startingYVel,
       startingYAcc,
+      animationCounter: 0,
+      spriteDef: def,
+      deformAngle: 0,
+      deformAmount: 0,
+      verticalContact: false,
       specialPath: null,
       pathPercentage: 0,
       pathPercentageSpeed: 0,
@@ -871,14 +1062,13 @@ export default class EnemySystem {
         data.startingYVel = (Math.random() < 0.5 ? -1 : 1) * vSpeed;
         break;
 
-      case EnemyType.PAINT_BUBBLES: {
-        // Tint the bubble its paint colour and remember it so the dropped
-        // paintdrop matches (C++ paintdrop inherits paint_bubble_colour_flag).
-        const pc = wave.paintColor ?? 0;
-        data.paintColor = pc;
-        enemy.setTint(PAINT_TINTS[pc] ?? PAINT_TINTS[0]);
+      case EnemyType.PAINT_BUBBLES:
+        // Remember the colour so the dropped paintdrop matches (C++ paintdrop
+        // inherits paint_bubble_colour_flag). No tint: the atlas frame chosen
+        // above is already the right colour, and multiplying 0xff0000 over the
+        // red sphere would flatten its shading and highlight to black.
+        data.paintColor = paintColor;
         break;
-      }
 
       case EnemyType.SOLID_DIAMONDS_DEVIANT:
         data.startingYVel = (Math.random() < 0.5 ? -1 : 1) * vSpeed;
@@ -908,6 +1098,19 @@ export default class EnemySystem {
         // Fuzz ignores world collision entirely
         body.setCollideWorldBounds(false);
         body.setAllowGravity(false);
+        // C++ :235-236 — the fuzz spawns a fuzz_overlay draw buddy: the same
+        // frame again, additively blended and colour-cycled, riding on top.
+        if (this.scene.textures.exists('fuzz_overlay')) {
+          const overlay = this.scene.add.image(x, y, 'fuzz_overlay', def.baseFrame);
+          overlay.setDisplaySize(def.size, def.size);
+          overlay.setDepth(Depth.SPECIAL_ENEMY); // draw_order CONST_UNSET = with its parent
+          overlay.setBlendMode(Phaser.BlendModes.ADD);
+          overlay.setAlpha(128 / 255); // opengl_vertex_alpha 128
+          data.overlay = overlay;
+          data.overlayCounter = 0;
+          // fuzz_overlay.txt:49-51 — the buddy dies with its parent.
+          enemy.once('destroy', () => overlay.destroy());
+        }
         break;
 
       default:
@@ -1095,7 +1298,15 @@ export default class EnemySystem {
       if (!enemy.active) return;
 
       const data = (enemy as any)._data as EnemyData;
-      if (!data) return;
+      if (!data) {
+        // The lurking molecules have no wave data but still animate (molecule.txt:94).
+        const holder = enemy as any;
+        if (holder._isMolecule) {
+          holder._animCounter = (holder._animCounter ?? 0) + 1;
+          enemy.setFrame(this.animationFrame(MOLECULE_SPRITE, holder._animCounter));
+        }
+        return;
+      }
 
       // Gate everything below on the on/off-screen lifecycle: an enemy that is
       // waiting to appear (or has just scrolled away) runs no behaviour and,
@@ -1146,6 +1357,11 @@ export default class EnemySystem {
           this.updateBasicBounce(enemy, data, body, speedScale);
           break;
       }
+
+      // C++ runs set_anim_frame inside each behaviour case
+      // (generic_level_enemy.txt:327-555); it depends only on the counter, so
+      // one call after the switch is equivalent.
+      this.updateEnemyAnimation(enemy, data);
 
       this.updateFiring(enemy, data);
     });
@@ -1506,33 +1722,54 @@ export default class EnemySystem {
       enemy.setVelocityX(data.xVelFixed * speedScale);
     }
 
+    // C++ :712-717 — the impact arms the squash from the INCOMING speed, and it
+    // has to be read before the set-power bounce overwrites yVelFixed.
+    this.armBounceDeform(data, body);
+
     // C++ generic_level_enemy.txt:712-718 — crabbies use the set-power bounce too,
     // so roof crabbies bounce along the ceiling instead of falling.
     this.bounceVerticallyBySetPower(enemy, data, body, speedScale);
 
-    // C++ squash/stretch deformation on bounce
-    // opengl_scale_x = 10000 + deform_amount * sin(deform_angle)
-    // opengl_scale_y = 10000 - deform_amount * sin(deform_angle)
-    // deform_angle += abs(y_acc) * 20
-    // deform_amount -= abs(y_acc) * 2 (minimum 0)
-    const absGravity = Math.abs(data.gravityFixed);
-    data.behaviourCounter += absGravity * 20; // deform_angle increment
-    data.storedVerticalSpeed = Math.max(0, (data.storedVerticalSpeed || 0) - absGravity * 2); // deform_amount decay
+    this.applyBounceDeform(enemy, data);
+  }
 
-    if (body.blocked.down || body.blocked.up) {
-      // Trigger deformation on bounce
-      data.storedVerticalSpeed = 3000; // initial deform_amount
+  /**
+   * C++ :712-717 — a vertical impact sets `scale_deform_amount = abs(y_vel) * 2`
+   * and snaps `deform_angle` to 9000, which is sin = 1: the sprite is at maximum
+   * stretch on the first frame after contact and decays from there. The port used
+   * to arm a flat 3000 and leave the angle wherever it happened to be, so bounces
+   * came out at an arbitrary phase — often mid-squash, sometimes invisible.
+   *
+   * Edge-triggered: `blocked.down` stays true while an enemy rests against a
+   * surface, and re-arming every one of those frames would pin the deform at full
+   * amplitude. The C++ arms inside the discrete collision event instead.
+   */
+  private armBounceDeform(data: EnemyData, body: Phaser.Physics.Arcade.Body): void {
+    const contact = body.blocked.down || body.blocked.up;
+    if (contact && !data.verticalContact) {
+      data.deformAmount = Math.abs(data.yVelFixed) * 2;
+      data.deformAngle = 9000;
     }
+    data.verticalContact = contact;
+  }
 
-    if (data.storedVerticalSpeed > 0) {
-      const deformAngle = (data.behaviourCounter / 36000) * Math.PI * 2;
-      const deformAmount = data.storedVerticalSpeed;
-      const scaleX = (10000 + deformAmount * Math.sin(deformAngle)) / 10000;
-      const scaleY = (10000 - deformAmount * Math.sin(deformAngle)) / 10000;
-      enemy.setScale(Phaser.Math.Clamp(scaleX, 0.5, 1.5), Phaser.Math.Clamp(scaleY, 0.5, 1.5));
-    } else {
-      enemy.setScale(1, 1);
-    }
+  /**
+   * C++ :485-496 — draw from the current deform state, THEN advance it:
+   *   temp_1 = scale_deform_amount sin deform_angle   (amplitude 10000)
+   *   opengl_scale_x = 10000 + temp_1 / opengl_scale_y = 10000 - temp_1
+   *   deform_angle += abs(y_acc) * 20   (clamped to 0..35999)
+   *   scale_deform_amount -= abs(y_acc) * 2  (floored at 0)
+   * The angle clamp is what makes this a single wobble that flatlines rather than
+   * a permanent oscillation. There is no clamp on the scales themselves
+   * (output.cpp:3139-3141 only rejects a non-positive width).
+   */
+  private applyBounceDeform(enemy: Phaser.Physics.Arcade.Sprite, data: EnemyData): void {
+    const t = data.deformAmount * Math.sin((data.deformAngle / 36000) * Math.PI * 2);
+    enemy.setScale((10000 + t) / 10000, (10000 - t) / 10000);
+
+    const step = Math.abs(data.gravityFixed);
+    data.deformAngle = Phaser.Math.Clamp(data.deformAngle + step * 20, 0, 35999);
+    data.deformAmount = Math.max(0, data.deformAmount - step * 2);
   }
 
   private updateSolidDiamondsDeviantBehaviour(
@@ -1673,8 +1910,16 @@ export default class EnemySystem {
       enemy.setVelocityX(data.xVelFixed * speedScale);
     }
 
+    // :700-703 arms the same squash the crabbies get, from the incoming speed.
+    this.armBounceDeform(data, body);
+
     // :700-706 — the set-power bounce, from whichever surface this wave uses.
     this.bounceVerticallyBySetPower(enemy, data, body, speedScale);
+
+    // :529-544 — the roof/floor bubbles deform on impact as well; only the
+    // mid-field wobbling ones (returned above) don't. spawn_paintball_wave.txt
+    // :229-230 is one of only two waves that set opengl_boolean_scale.
+    this.applyBounceDeform(enemy, data);
   }
 
   private updateBasicBounce(

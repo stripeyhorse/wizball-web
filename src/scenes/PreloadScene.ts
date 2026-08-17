@@ -2,7 +2,10 @@ import Phaser from 'phaser';
 import { PRELOAD } from '../types/game';
 
 // Frame sizes confirmed from C++ source BMP filenames:
-//   wizball[set][48][48][24][24].bmp   → 512×512 → 10 cols, 7 rows (64 frames)
+//   wizball[set][48][48][24][24].bmp   → 512×512 → 10 cols × 10 rows = 100 frames
+//     (C++ output.cpp:1608-1632 slices the same way and discards the same 32px
+//      remainder on each axis, so the indices line up. Frames 0-63 are the spin
+//      animation, 64-94 the life-indicator backing animation.)
 //   enemies_01[set][48][48][24][24].bmp → 512×512 → 48×48
 //   level_1_tiles_new[set][16][16][0][0].bmp → 512×512 → 32×32 = 1024 frames
 //   catellite[arb].bmp                → arbitrary atlas (17 frames)
@@ -65,6 +68,14 @@ export default class PreloadScene extends Phaser.Scene {
     });
     this.load.spritesheet('enemies02', 'assets/sprites/enemies02.png', {
       frameWidth: 48, frameHeight: 48
+    });
+    // fuzz_base[set][64][64][32][32].bmp + its additive overlay buddy — 256x256,
+    // 16 frames of 64x64 (spawn_fuzz.txt:115-117, fuzz_overlay.txt:14-15).
+    this.load.spritesheet('fuzz_base', 'assets/sprites/fuzz_base.png', {
+      frameWidth: 64, frameHeight: 64
+    });
+    this.load.spritesheet('fuzz_overlay', 'assets/sprites/fuzz_overlay.png', {
+      frameWidth: 64, frameHeight: 64
     });
 
     // Level tilesheets (16x16 tiles, 32x32 grid)

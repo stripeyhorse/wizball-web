@@ -59,4 +59,19 @@ export interface WaveConfig {
   // Paint-bubble colour (0=Red, 1=Green, 2=Blue). Only set for PAINT_BUBBLES
   // waves so the dropped paintdrop matches the bubble that was shot.
   paintColor?: number;
+  // Sheet + frame range for this wave's children, rolled once by
+  // EnemySystem.rollWaveSprite() the first time the wave spawns something. The
+  // C++ spawn scripts roll the colour variant per WAVE, not per enemy.
+  spriteDef?: EnemySpriteDef;
+}
+
+// Mirrors EnemySystem's sprite definition; declared here so WaveConfig can hold
+// one without importing the system into the datatables.
+export interface EnemySpriteDef {
+  sheet: string;
+  baseFrame: number;
+  frameCount: number;
+  anim: number;
+  delay: number;
+  size: number;
 }
