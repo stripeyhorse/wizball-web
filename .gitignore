@@ -13,3 +13,9 @@ node_modules/
 # Vite
 .vite/
 *.local
+
+# Build output — Vercel builds this, it is not committed
+dist/
+
+# Vercel CLI local state
+.vercel/

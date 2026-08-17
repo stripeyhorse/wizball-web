@@ -22,6 +22,16 @@ bun run preview  # serve the production build
 The build uses a relative base path, so `dist/` can be dropped on any static host or
 opened from a subdirectory.
 
+## Hosting
+
+Deployed on [Vercel](https://vercel.com) as a static build straight off `main`. `vercel.json`
+pins the whole thing: `bun install --frozen-lockfile`, `bun run build`, serve `dist/`. There is
+no server side — it's the Vite output and the files under `public/`.
+
+`dist/` is **not** committed; Vercel builds it. Import the repo once at
+vercel.com/new (the defaults in `vercel.json` are picked up automatically) and every push to
+`main` ships, with preview deploys per branch.
+
 ## Layout
 
 ```
