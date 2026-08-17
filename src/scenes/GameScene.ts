@@ -3318,6 +3318,8 @@ export default class GameScene extends Phaser.Scene {
       currentLevel: this.currentLevel,
       weaponCollection: this.weaponCollection,
       enemyCount: this.enemySystem.getActiveEnemyCount(),
+      // The life indicator's backing waits on a held frame while there is no ball.
+      playerAlive: this.player?.active === true && this.player.visible,
     });
 
     this.cauldronSystem.setFillLevels(this.cauldronFill);

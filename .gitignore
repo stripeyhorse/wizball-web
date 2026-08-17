@@ -1,5 +1,11 @@
 node_modules/
 
+# Bun is the package manager here. A stray npm lockfile also makes Vercel's
+# build detection pick npm over bun.
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
 # Claude Code local state (contains worktrees / stale checkouts — never commit)
 .claude/
 .codex

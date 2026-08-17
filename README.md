@@ -74,3 +74,23 @@ The C++ remake is the source of truth:
 - `wizball/wizball/sprites/*.txt` — sprite atlas definitions
 
 `PARITY_PLAN.md` tracks how far the port has got against it.
+
+Sprite sheets and atlases are converted straight out of that tree's `sprites/` directory
+(`magick '<name>.bmp' -transparent '#FF00FF' PNG32:<name>.png`), and the arbitrary-layout
+atlases get their Phaser JSON from `generate-atlas-json.js`, which reads the original
+`[arb].txt` frame lists. Both are kept next to the PNG so the mapping stays checkable.
+
+## Licence
+
+The source code is MIT — see [LICENSE](LICENSE).
+
+**The game content is not.** Everything under `public/assets/` and the datatables under
+`src/data/` are Wizball's: sprites, tilemaps, sound effects, music and tuning tables
+derived from the 1987 Ocean / Sensible Software original and from the Retrospec C++
+remake. They belong to their respective owners, they are here for a non-commercial port,
+and the MIT grant does not extend to them.
+
+Practically: the repo is private, and that is the right default. Making it public, or
+hosting the built game somewhere discoverable, publishes that content too — worth
+resolving deliberately rather than by accident. Wizball fan projects have generally been
+tolerated, but tolerated is not licensed.

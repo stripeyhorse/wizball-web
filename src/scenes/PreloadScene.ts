@@ -104,6 +104,9 @@ export default class PreloadScene extends Phaser.Scene {
     this.load.atlas('bullets', 'assets/sprites/player_bullets.png', 'assets/sprites/bullets-atlas.json');
     this.load.atlas('pickup', 'assets/sprites/pickup.png', 'assets/sprites/pickup-atlas.json');
     this.load.atlas('panel_icons', 'assets/sprites/panel_icons.png', 'assets/sprites/panel_icons-atlas.json');
+    // font[arb] — the original's proportional font. Frames 74-91 are the "Lives N"
+    // glyphs the life indicator draws (wizball_life_indicator.txt:19-20).
+    this.load.atlas('font', 'assets/sprites/font.png', 'assets/sprites/font-atlas.json');
 
     // Load C++ tilemap files
     for (let i = 1; i <= 8; i++) {

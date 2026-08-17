@@ -49,11 +49,15 @@ function generateAtlasJSON(name, txtPath, pngName) {
     };
   });
   
-  writeFileSync(`public/assets/sprites/${name}[arb].json`, JSON.stringify(atlasJSON, null, 2));
-  console.log(`Generated ${name}[arb].json with ${frames.length} frames`);
+  // PreloadScene loads these as `<name>-atlas.json`. This used to write
+  // `<name>[arb].json`, so re-running the generator silently produced files the
+  // game never read.
+  writeFileSync(`public/assets/sprites/${name}-atlas.json`, JSON.stringify(atlasJSON, null, 2));
+  console.log(`Generated ${name}-atlas.json with ${frames.length} frames`);
 }
 
 generateAtlasJSON('catellite', 'public/assets/sprites/catellite[arb].txt', 'catellite');
 generateAtlasJSON('paintballs', 'public/assets/sprites/paintballs_and_drips[arb].txt', 'paintballs_and_drips');
 generateAtlasJSON('bullets', 'public/assets/sprites/player_bullets[arb].txt', 'player_bullets');
 generateAtlasJSON('pickup', 'public/assets/sprites/pickup[arb].txt', 'pickup');
+generateAtlasJSON('font', 'public/assets/sprites/font[arb].txt', 'font');
